@@ -129,17 +129,9 @@ class AGMRegistrationController extends Controller
             Log::info('AGM Registration created with ID: ' . $registration->id);
 
             $qrContent = json_encode([
-                'id' => $registration->id,
                 'membership' => $membership_number,
-                'name' => $data['full_name'],
-                'email' => $data['email'],
-                'meal' => $data['meal_preference'],
-                'timestamp' => now()->timestamp,
-                'event' => 'Annual General Meeting',
-                'event_date' => '2024',
-                'type' => 'agm_registration',
-                'attended' => false,
-                'meal_received' => false
+                'id' => $registration->id,
+                'type' => 'agm_registration'
             ]);
             
             Log::info('Generating AGM QR code...');
@@ -634,7 +626,11 @@ class AGMRegistrationController extends Controller
             $mealReceived = $request->get('meal_received');
             $search = $request->get('search');
 
-            $query = AGMRegistration::query();
+            $query = DB::table('agm_registrations')->select([
+                'id', 'membership_number', 'full_name', 'email', 'mobile', 
+                'attended', 'meal_received', 'meal_preference',
+                'created_at', 'updated_at'
+            ]);
 
             if ($attended !== null) {
                 $query->where('attended', filter_var($attended, FILTER_VALIDATE_BOOLEAN));

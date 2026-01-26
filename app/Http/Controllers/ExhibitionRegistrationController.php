@@ -79,6 +79,7 @@ class ExhibitionRegistrationController extends Controller
             'full_name' => 'required|string|max:255',
             'email' => 'required|email|max:255',
             'mobile' => 'required|string|max:20',
+            'meal_preference' => 'required|in:veg,non_veg',
         ]);
 
         if ($validator->fails()) {
@@ -116,6 +117,7 @@ class ExhibitionRegistrationController extends Controller
                 'full_name' => trim($data['full_name']),
                 'email' => trim($data['email']),
                 'mobile' => trim($data['mobile']),
+                'meal_preference' => $data['meal_preference'],
                 'attended' => false,
                 'meal_received' => false,
             ]);
@@ -123,15 +125,9 @@ class ExhibitionRegistrationController extends Controller
             Log::info('Exhibition registration created with ID: ' . $registration->id);
 
             $qrContent = json_encode([
-                'id' => $registration->id,
                 'membership' => $membership_number,
-                'name' => $data['full_name'],
-                'email' => $data['email'],
-                'timestamp' => now()->timestamp,
-                'event' => 'SLIA Annual Exhibition 2026',
-                'pass_type' => 'exhibition_only',
-                'attended' => false,
-                'meal_received' => false
+                'id' => $registration->id,
+                'type' => 'exhibition_registration'
             ]);
             
             $qrSvg = QrCode::format('svg')
@@ -549,6 +545,9 @@ class ExhibitionRegistrationController extends Controller
             $notAttended = ExhibitionRegistration::where('attended', false)->count();
             $mealReceived = ExhibitionRegistration::where('meal_received', true)->count();
             
+            $vegCount = ExhibitionRegistration::where('meal_preference', 'veg')->count();
+            $nonVegCount = ExhibitionRegistration::where('meal_preference', 'non_veg')->count();
+            
             $attendanceRate = $total > 0 ? round(($attended / $total) * 100, 2) : 0;
             $mealRate = $attended > 0 ? round(($mealReceived / $attended) * 100, 2) : 0;
 
@@ -562,6 +561,8 @@ class ExhibitionRegistrationController extends Controller
                     'not_attended' => $notAttended,
                     'attendance_rate' => $attendanceRate . '%',
                     'meal_received' => $mealReceived,
+                    'veg_meals' => $vegCount,
+                    'non_veg_meals' => $nonVegCount,
                     'meal_distribution_rate' => $mealRate . '%',
                     'last_registration' => ExhibitionRegistration::latest()->first()->created_at ?? null,
                     'last_attendance' => ExhibitionRegistration::where('attended', true)
@@ -588,7 +589,11 @@ class ExhibitionRegistrationController extends Controller
             $mealReceived = $request->get('meal_received');
             $search = $request->get('search');
 
-            $query = ExhibitionRegistration::query();
+            $query = DB::table('exhibition_registrations')->select([
+                'id', 'membership_number', 'full_name', 'email', 'mobile', 
+                'attended', 'meal_received', 'meal_preference',
+                'created_at', 'updated_at'
+            ]);
 
             if ($attended !== null) {
                 $query->where('attended', filter_var($attended, FILTER_VALIDATE_BOOLEAN));

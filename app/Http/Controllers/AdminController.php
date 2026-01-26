@@ -70,4 +70,87 @@ class AdminController extends Controller
             ]);
         }
     }
+    /**
+     * Get statistics for all events in a single call
+     * Reduces request overhead for the dashboard
+     */
+    public function getGlobalStats()
+    {
+        try {
+            $stats = [
+                'conference' => [
+                    'total_registrations' => DB::table('conference_registrations')->count(),
+                    'attended' => DB::table('conference_registrations')->where('attended', true)->count(),
+                    'payment_completed' => DB::table('conference_registrations')->where('payment_status', 'completed')->count(),
+                ],
+                'exhibition' => [
+                    'total_registrations' => DB::table('exhibition_registrations')->count(),
+                    'attended' => DB::table('exhibition_registrations')->where('attended', true)->count(),
+                ],
+                'agm' => [
+                    'total_registrations' => DB::table('agm_registrations')->count(),
+                    'attended' => DB::table('agm_registrations')->where('attended', true)->count(),
+                ],
+                'inauguration' => [
+                    'total_registrations' => DB::table('inauguration_registrations')->count(),
+                    'attended' => DB::table('inauguration_registrations')->where('attended', true)->count(),
+                ],
+            ];
+
+            return response()->json([
+                'success' => true,
+                'stats' => $stats
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch global stats: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Search for a single registration by ID or membership number
+     * across a specific table. Used by the QR scanner for real-time 
+     * remote lookup if local cache is empty.
+     */
+    public function lookupRegistration(Request $request)
+    {
+        $id = $request->get('identifier');
+        $eventType = $request->get('event_type');
+
+        if (!$id || !$eventType) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Identifier and event_type are required'
+            ], 400);
+        }
+
+        $table = '';
+        switch ($eventType) {
+            case 'conference': $table = 'conference_registrations'; break;
+            case 'exhibition': $table = 'exhibition_registrations'; break;
+            case 'agm': $table = 'agm_registrations'; break;
+            case 'inauguration': $table = 'inauguration_registrations'; break;
+            default:
+                return response()->json(['success' => false, 'message' => 'Invalid event type'], 400);
+        }
+
+        $registration = DB::table($table)
+            ->where('id', $id)
+            ->orWhere('membership_number', $id)
+            ->first();
+
+        if ($registration) {
+            return response()->json([
+                'success' => true,
+                'data' => $registration
+            ]);
+        }
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Registration not found'
+        ], 404);
+    }
 }

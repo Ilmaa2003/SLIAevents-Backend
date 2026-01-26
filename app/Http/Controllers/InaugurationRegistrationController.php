@@ -129,17 +129,9 @@ class InaugurationRegistrationController extends Controller
             Log::info('Inauguration Registration created with ID: ' . $registration->id);
 
             $qrContent = json_encode([
-                'id' => $registration->id,
                 'membership' => $membership_number,
-                'name' => $data['full_name'],
-                'email' => $data['email'],
-                'meal' => $data['meal_preference'],
-                'timestamp' => now()->timestamp,
-                'event' => 'Inauguration Ceremony',
-                'event_date' => '2024',
-                'type' => 'inauguration_registration',
-                'attended' => false,
-                'meal_received' => false
+                'id' => $registration->id,
+                'type' => 'inauguration_registration'
             ]);
             
             Log::info('Generating Inauguration QR code...');
@@ -634,7 +626,11 @@ class InaugurationRegistrationController extends Controller
             $mealReceived = $request->get('meal_received');
             $search = $request->get('search');
 
-            $query = InaugurationRegistration::query();
+            $query = DB::table('inauguration_registrations')->select([
+                'id', 'membership_number', 'full_name', 'email', 'mobile', 
+                'attended', 'meal_received', 'meal_preference',
+                'created_at', 'updated_at'
+            ]);
 
             if ($attended !== null) {
                 $query->where('attended', filter_var($attended, FILTER_VALIDATE_BOOLEAN));

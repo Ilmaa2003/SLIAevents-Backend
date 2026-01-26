@@ -19,8 +19,12 @@ class ConferenceRegistration extends Model
         'category',
         'member_verified',
         'nic_passport',
+        'payment_reqid',
         'payment_ref_no',
+        'payment_status',
+        'payment_response',
         'include_lunch',
+        'meal_preference',
         'food_received',
         'attended',
         'check_in_time',
@@ -36,6 +40,7 @@ class ConferenceRegistration extends Model
         'concession_eligible' => 'boolean',
         'concession_applied' => 'boolean',
         'check_in_time' => 'datetime',
+        'payment_response' => 'array',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
@@ -47,6 +52,18 @@ class ConferenceRegistration extends Model
             'slia_member' => 'SLIA Member',
             'general_public' => 'General Public',
             'international' => 'International',
+            default => 'Unknown',
+        };
+    }
+
+    // Payment status labels
+    public function getPaymentStatusLabelAttribute()
+    {
+        return match($this->payment_status) {
+            'pending' => 'Pending',
+            'initiated' => 'Payment Initiated',
+            'completed' => 'Completed',
+            'failed' => 'Failed',
             default => 'Unknown',
         };
     }
@@ -64,10 +81,12 @@ class ConferenceRegistration extends Model
     }
 
     // Mark as paid
-    public function markAsPaid($paymentRefNo)
+    public function markAsPaid($paymentRefNo, $response = null)
     {
         $this->update([
             'payment_ref_no' => $paymentRefNo,
+            'payment_status' => 'completed',
+            'payment_response' => $response
         ]);
     }
 
@@ -119,4 +138,19 @@ class ConferenceRegistration extends Model
     {
         return $query->where('include_lunch', true)->where('food_received', false);
     }
+
+    // Scope: Paid registrations
+    public function scopePaid($query)
+    {
+        return $query->where('payment_status', 'completed');
+    }
+
+    // Scope: Pending payments
+    public function scopePendingPayment($query)
+    {
+        return $query->where('payment_status', 'pending');
+    }
+
+
+    
 }
