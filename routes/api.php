@@ -41,6 +41,11 @@ Route::prefix('inauguration')->group(function () {
     Route::post('/registrations', 
         [InaugurationRegistrationController::class, 'store']
     );
+
+    // Get single registration (Public)
+    Route::get('/registrations/{id}', 
+        [InaugurationRegistrationController::class, 'getRegistration']
+    )->where('id', '[0-9]+');
     
     // Mark attendance
     Route::post('/mark-attendance', 
@@ -133,6 +138,11 @@ Route::prefix('agm')->group(function () {
     Route::post('/registrations', 
         [AGMRegistrationController::class, 'store']
     );
+
+    // Get single registration (Public)
+    Route::get('/registrations/{id}', 
+        [AGMRegistrationController::class, 'getRegistration']
+    )->where('id', '[0-9]+');
     
     // Mark attendance
     Route::post('/mark-attendance', 
@@ -225,6 +235,11 @@ Route::prefix('exhibition')->group(function () {
     Route::post('/registrations', 
         [ExhibitionRegistrationController::class, 'store']
     );
+
+    // Get single registration (Public)
+    Route::get('/registrations/{id}', 
+        [ExhibitionRegistrationController::class, 'getRegistration']
+    )->where('id', '[0-9]+');
     
     // Mark attendance
     Route::post('/mark-attendance', 
@@ -304,6 +319,9 @@ Route::prefix('conference')->group(function () {
     
     // Registration & payment initiation
     Route::post('/initiate-payment', [ConferenceRegistrationController::class, 'initiatePayment']);
+
+    // Get single registration (Public)
+    Route::get('/registration/{id}', [ConferenceRegistrationController::class, 'getRegistration']);
     
     // Payment callback (from Paycorp)
     Route::post('/payment-callback', [ConferenceRegistrationController::class, 'paymentCallback']);
