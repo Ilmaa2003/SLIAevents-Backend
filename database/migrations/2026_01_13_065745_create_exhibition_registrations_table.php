@@ -12,17 +12,17 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('exhibition_registrations', function (Blueprint $table) {
-            $table->id();
+            $table->bigIncrements('id');
             $table->string('membership_number')->unique();
             $table->string('full_name');
             $table->string('email');
             $table->string('mobile');
-            $table->boolean('attended')->default(false);
+            $table->enum('meal_preference', ['veg', 'non_veg'])->nullable();
+            $table->boolean('attended')->default(0);
+            $table->boolean('meal_received')->default(0);
             $table->timestamp('check_in_time')->nullable();
             $table->timestamps();
             
-            // Index for faster queries
-            $table->index('membership_number');
             $table->index('email');
             $table->index('attended');
             $table->index('created_at');

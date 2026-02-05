@@ -9,12 +9,16 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('admins', function (Blueprint $table) {
-            $table->id();
-            $table->string('name');
-            $table->string('email')->unique();
-            $table->string('password');
-            $table->rememberToken();
-            $table->timestamps();
+            $table->integer('id')->autoIncrement();
+            $table->string('username', 50)->unique();
+            $table->string('password', 255);
+            $table->string('name', 100);
+            $table->string('email', 100)->nullable();
+            $table->string('remember_token', 100)->nullable();
+            $table->timestamp('created_at')->useCurrent();
+            $table->timestamp('updated_at')->useCurrent()->useCurrentOnUpdate();
+            
+            $table->primary('id');
         });
     }
 

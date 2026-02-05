@@ -14,15 +14,15 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('agm_registrations', function (Blueprint $table) {
-            $table->id();
+            $table->bigIncrements('id');
             $table->string('membership_number')->unique();
             $table->string('full_name');
             $table->string('email');
             $table->string('mobile');
-            $table->boolean('attended')->default(false)->nullable();
+            $table->enum('meal_preference', ['veg', 'non_veg'])->nullable();
+            $table->boolean('attended')->default(0);
+            $table->boolean('meal_received')->default(0);
             $table->timestamps();
-            
-            $table->index('membership_number');
         });
     }
 

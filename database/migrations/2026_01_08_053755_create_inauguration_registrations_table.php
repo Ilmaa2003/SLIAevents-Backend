@@ -9,30 +9,21 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::create('admins', function (Blueprint $table) {
-            $table->id();
-            $table->string('username')->unique();
-            $table->string('password');
-            $table->string('email')->nullable();
-            $table->string('name')->nullable();
-            $table->boolean('is_active')->default(true);
+        Schema::create('inauguration_registrations', function (Blueprint $table) {
+            $table->bigIncrements('id');
+            $table->string('membership_number');
+            $table->string('full_name');
+            $table->string('email');
+            $table->string('mobile');
+            $table->enum('meal_preference', ['veg', 'non_veg']);
+            $table->boolean('attended')->default(0);
+            $table->boolean('meal_received')->default(0);
             $table->timestamps();
         });
-
-        // Insert default admin
-        DB::table('admins')->insert([
-            'username' => 'admin',
-            'password' => 'admin123', // Plain text
-            'email' => 'admin@architect2026.com',
-            'name' => 'System Administrator',
-            'is_active' => true,
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
     }
 
     public function down(): void
     {
-        Schema::dropIfExists('admins');
+        Schema::dropIfExists('inauguration_registrations');
     }
 };
