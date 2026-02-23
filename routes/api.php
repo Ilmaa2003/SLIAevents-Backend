@@ -32,15 +32,21 @@ Route::prefix('inauguration')->group(function () {
         ]);
     });
     
-    // Verify member
-    Route::get('/verify-member/{membership_number}', 
-        [InaugurationRegistrationController::class, 'verifyAndCheckMember']
-    );
+    // Verify member (CLOSED)
+    // Route::get('/verify-member/{membership_number}', 
+    //     [InaugurationRegistrationController::class, 'verifyAndCheckMember']
+    // );
+    Route::get('/verify-member/{membership_number}', function() {
+        return response()->json(['status' => 'closed', 'message' => 'Registration is now closed.'], 403);
+    });
     
-    // Register
-    Route::post('/registrations', 
-        [InaugurationRegistrationController::class, 'store']
-    );
+    // Register (CLOSED)
+    // Route::post('/registrations', 
+    //     [InaugurationRegistrationController::class, 'store']
+    // );
+    Route::post('/registrations', function() {
+        return response()->json(['success' => false, 'message' => 'Registration is now closed as the event is completed.'], 403);
+    });
 
     // Get single registration (Public)
     Route::get('/registrations/{id}', 
@@ -129,15 +135,21 @@ Route::prefix('agm')->group(function () {
         ]);
     });
     
-    // Verify member
-    Route::get('/verify-member/{membership_number}', 
-        [AGMRegistrationController::class, 'verifyAndCheckMember']
-    );
+    // Verify member (CLOSED)
+    // Route::get('/verify-member/{membership_number}', 
+    //     [AGMRegistrationController::class, 'verifyAndCheckMember']
+    // );
+    Route::get('/verify-member/{membership_number}', function() {
+        return response()->json(['status' => 'closed', 'message' => 'Registration is now closed.'], 403);
+    });
     
-    // Register
-    Route::post('/registrations', 
-        [AGMRegistrationController::class, 'store']
-    );
+    // Register (CLOSED)
+    // Route::post('/registrations', 
+    //     [AGMRegistrationController::class, 'store']
+    // );
+    Route::post('/registrations', function() {
+        return response()->json(['success' => false, 'message' => 'Registration is now closed as the event is completed.'], 403);
+    });
 
     // Get single registration (Public)
     Route::get('/registrations/{id}', 
@@ -226,15 +238,21 @@ Route::prefix('exhibition')->group(function () {
         ]);
     });
     
-    // Verify member
-    Route::get('/verify-member/{membership_number}', 
-        [ExhibitionRegistrationController::class, 'verifyAndCheckMember']
-    );
+    // Verify member (CLOSED)
+    // Route::get('/verify-member/{membership_number}', 
+    //     [ExhibitionRegistrationController::class, 'verifyAndCheckMember']
+    // );
+    Route::get('/verify-member/{membership_number}', function() {
+        return response()->json(['status' => 'closed', 'message' => 'Registration is now closed.'], 403);
+    });
     
-    // Register
-    Route::post('/registrations', 
-        [ExhibitionRegistrationController::class, 'store']
-    );
+    // Register (CLOSED)
+    // Route::post('/registrations', 
+    //     [ExhibitionRegistrationController::class, 'store']
+    // );
+    Route::post('/registrations', function() {
+        return response()->json(['success' => false, 'message' => 'Registration is now closed as the event is completed.'], 403);
+    });
 
     // Get single registration (Public)
     Route::get('/registrations/{id}', 
@@ -321,8 +339,11 @@ Route::get('/test-sampath', [ConferenceRegistrationController::class, 'testSampa
 
 // Conference Registration Routes
 Route::prefix('conference')->group(function () {
-    // Membership verification
-    Route::get('/verify-member/{membership_number}', [ConferenceRegistrationController::class, 'verifyMember']);
+    // Membership verification (CLOSED)
+    // Route::get('/verify-member/{membership_number}', [ConferenceRegistrationController::class, 'verifyMember']);
+    Route::get('/verify-member/{membership_number}', function() {
+        return response()->json(['status' => 'closed', 'message' => 'Registration is now closed.'], 403);
+    });
     
     // Google Sheets Data Sync URL
     Route::get('/google-sheets-data', function() {
@@ -334,8 +355,11 @@ Route::prefix('conference')->group(function () {
     // Student ID validation
     Route::post('/validate-student-id', [ConferenceRegistrationController::class, 'validateStudentId']);
     
-    // Registration & payment initiation
-    Route::post('/initiate-payment', [ConferenceRegistrationController::class, 'initiatePayment']);
+    // Registration & payment initiation (CLOSED)
+    // Route::post('/initiate-payment', [ConferenceRegistrationController::class, 'initiatePayment']);
+    Route::post('/initiate-payment', function() {
+        return response()->json(['success' => false, 'message' => 'Registration and payments are now closed.'], 403);
+    });
 
     // Get single registration (Public)
     Route::get('/registrations/{id}', [ConferenceRegistrationController::class, 'getRegistration']);
@@ -485,8 +509,14 @@ Route::prefix('conference')->group(function () {
 
 /* ================= MEMBERS NIGHT 2026 ROUTES ================= */
 Route::prefix('fellowship')->group(function () {
-    Route::get('/verify-member/{membership_number}', [App\Http\Controllers\FellowshipRegistrationController::class, 'verifyMember']);
-    Route::post('/initiate-payment', [App\Http\Controllers\FellowshipRegistrationController::class, 'initiatePayment']);
+    // Route::get('/verify-member/{membership_number}', [App\Http\Controllers\FellowshipRegistrationController::class, 'verifyMember']);
+    // Route::post('/initiate-payment', [App\Http\Controllers\FellowshipRegistrationController::class, 'initiatePayment']);
+    Route::get('/verify-member/{membership_number}', function() {
+        return response()->json(['status' => 'closed', 'message' => 'Registration is now closed.'], 403);
+    });
+    Route::post('/initiate-payment', function() {
+        return response()->json(['success' => false, 'message' => 'Registration and payments are now closed.'], 403);
+    });
     Route::get('/check-payment/{id}', [App\Http\Controllers\FellowshipRegistrationController::class, 'checkPaymentStatus']);
     Route::post('/payment/callback', [App\Http\Controllers\FellowshipRegistrationController::class, 'paymentCallback']);
     Route::post('/mark-attendance', [App\Http\Controllers\FellowshipRegistrationController::class, 'markAttendance']);
