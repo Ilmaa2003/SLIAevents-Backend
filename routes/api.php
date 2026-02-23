@@ -310,18 +310,35 @@ Route::prefix('exhibition')->group(function () {
     });
 });
 
+
+//Payment Bridge Test Routes
+use App\Http\Controllers\PaymentTestController;
+Route::get('/test-bridge-connection', [PaymentTestController::class, 'testConnection']);
+Route::get('/test-bridge-payment', [PaymentTestController::class, 'testBridge']);
+
 Route::get('/test-paycorp', [ConferenceRegistrationController::class, 'testPaycorpConnection']);
+Route::get('/test-sampath', [ConferenceRegistrationController::class, 'testSampathConnection']);
 
 // Conference Registration Routes
 Route::prefix('conference')->group(function () {
     // Membership verification
     Route::get('/verify-member/{membership_number}', [ConferenceRegistrationController::class, 'verifyMember']);
     
+    // Google Sheets Data Sync URL
+    Route::get('/google-sheets-data', function() {
+        return \App\Models\ConferenceRegistration::where('payment_status', 'completed')
+            ->orderBy('created_at', 'desc')
+            ->get();
+    });
+    
+    // Student ID validation
+    Route::post('/validate-student-id', [ConferenceRegistrationController::class, 'validateStudentId']);
+    
     // Registration & payment initiation
     Route::post('/initiate-payment', [ConferenceRegistrationController::class, 'initiatePayment']);
 
     // Get single registration (Public)
-    Route::get('/registration/{id}', [ConferenceRegistrationController::class, 'getRegistration']);
+    Route::get('/registrations/{id}', [ConferenceRegistrationController::class, 'getRegistration']);
     
     // Payment callback (from Paycorp)
     Route::post('/payment-callback', [ConferenceRegistrationController::class, 'paymentCallback']);
@@ -343,14 +360,17 @@ Route::prefix('conference')->group(function () {
     // Statistics
     Route::get('/stats', [ConferenceRegistrationController::class, 'getStats']);
     Route::get('/payment-stats', [ConferenceRegistrationController::class, 'getPaymentStats']);
+
+    // Download Pass (PDF)
+    Route::post('/generate-a4-pass', [ConferenceRegistrationController::class, 'generateA4Pass']);
     
     // Admin routes
     Route::prefix('admin')->group(function () {
         Route::get('/registrations', [ConferenceRegistrationController::class, 'getAllRegistrations']);
-        Route::get('/export-registrations', [ConferenceRegistrationController::class, 'exportRegistrations']);
-        Route::get('/registration/{id}', [ConferenceRegistrationController::class, 'getRegistration']);
-        Route::put('/registration/{id}', [ConferenceRegistrationController::class, 'updateRegistration']);
-        Route::delete('/registration/{id}', [ConferenceRegistrationController::class, 'deleteRegistration']);
+        Route::get('/export', [ConferenceRegistrationController::class, 'exportRegistrations']);
+        Route::get('/registrations/{id}', [ConferenceRegistrationController::class, 'getRegistration']);
+        Route::put('/registrations/{id}', [ConferenceRegistrationController::class, 'updateRegistration']);
+        Route::delete('/registrations/{id}', [ConferenceRegistrationController::class, 'deleteRegistration']);
         Route::get('/payment-stats', [ConferenceRegistrationController::class, 'getPaymentStats']);
         Route::get('/dashboard-summary', [ConferenceRegistrationController::class, 'dashboardSummary']);
     });
@@ -463,6 +483,30 @@ Route::prefix('conference')->group(function () {
     Route::get('/integration-status', [ConferenceRegistrationController::class, 'integrationStatus']);
 });
 
+/* ================= MEMBERS NIGHT 2026 ROUTES ================= */
+Route::prefix('fellowship')->group(function () {
+    Route::get('/verify-member/{membership_number}', [App\Http\Controllers\FellowshipRegistrationController::class, 'verifyMember']);
+    Route::post('/initiate-payment', [App\Http\Controllers\FellowshipRegistrationController::class, 'initiatePayment']);
+    Route::get('/check-payment/{id}', [App\Http\Controllers\FellowshipRegistrationController::class, 'checkPaymentStatus']);
+    Route::post('/payment/callback', [App\Http\Controllers\FellowshipRegistrationController::class, 'paymentCallback']);
+    Route::post('/mark-attendance', [App\Http\Controllers\FellowshipRegistrationController::class, 'markAttendance']);
+    Route::get('/stats', [App\Http\Controllers\FellowshipRegistrationController::class, 'getStats']);
+
+    // Google Sheets Data Sync URL
+    Route::get('/google-sheets-data', function() {
+        return \App\Models\FellowshipRegistration::where('payment_status', 'completed')
+            ->orderBy('created_at', 'desc')
+            ->get();
+    });
+
+    // Admin routes
+    Route::prefix('admin')->group(function () {
+        Route::get('/registrations', [App\Http\Controllers\FellowshipRegistrationController::class, 'getAllRegistrations']);
+        Route::get('/export', [App\Http\Controllers\FellowshipRegistrationController::class, 'export']);
+        Route::put('/registrations/{id}', [App\Http\Controllers\FellowshipRegistrationController::class, 'update']);
+    });
+});
+
 /* ================= ADMIN ROUTES ================= */
 Route::prefix('admin')->group(function () {
     // Login
@@ -476,6 +520,9 @@ Route::prefix('admin')->group(function () {
     
     // Validate token
     Route::get('/validate', [AdminController::class, 'validateToken']);
+    
+    // Lookup registration (Scanning fallback)
+    Route::get('/lookup-registration', [AdminController::class, 'lookupRegistration']);
 });
 
 /* ================= COMBINED EVENT ROUTES ================= */

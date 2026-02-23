@@ -79,9 +79,9 @@ class AdminController extends Controller
         try {
             $stats = [
                 'conference' => [
-                    'total_registrations' => DB::table('conference_registrations')->count(),
-                    'attended' => DB::table('conference_registrations')->where('attended', true)->count(),
-                    'payment_completed' => DB::table('conference_registrations')->where('payment_status', 'completed')->count(),
+                    'total_registrations' => DB::table('conference_registrations')->where('payment_status', 'completed')->count(),
+                    'attended' => DB::table('conference_registrations')->where('payment_status', 'completed')->where('attended', true)->count(),
+                    'total_revenue' => DB::table('conference_registrations')->where('payment_status', 'completed')->sum('total_amount'),
                 ],
                 'exhibition' => [
                     'total_registrations' => DB::table('exhibition_registrations')->count(),
@@ -94,6 +94,11 @@ class AdminController extends Controller
                 'inauguration' => [
                     'total_registrations' => DB::table('inauguration_registrations')->count(),
                     'attended' => DB::table('inauguration_registrations')->where('attended', true)->count(),
+                ],
+                'fellowship' => [
+                    'total_registrations' => DB::table('fellowship_registrations')->where('payment_status', 'completed')->count(),
+                    'attended' => DB::table('fellowship_registrations')->where('attended', true)->count(),
+                    'total_revenue' => DB::table('fellowship_registrations')->where('payment_status', 'completed')->sum('total_amount'),
                 ],
             ];
 
@@ -132,14 +137,20 @@ class AdminController extends Controller
             case 'exhibition': $table = 'exhibition_registrations'; break;
             case 'agm': $table = 'agm_registrations'; break;
             case 'inauguration': $table = 'inauguration_registrations'; break;
+            case 'fellowship': $table = 'fellowship_registrations'; break;
             default:
                 return response()->json(['success' => false, 'message' => 'Invalid event type'], 400);
         }
 
-        $registration = DB::table($table)
+        $query = DB::table($table)
             ->where('id', $id)
-            ->orWhere('membership_number', $id)
-            ->first();
+            ->orWhere('membership_number', $id);
+            
+        // Check for student_id or nic_passport if columns exist
+        // Note: This is a simple generic lookup, might need adjustment per table schema if columns missing
+        // For now, assuming standard fields or catching detailed logic in controllers
+        
+        $registration = $query->first();
 
         if ($registration) {
             return response()->json([

@@ -13,6 +13,7 @@ class ConferenceRegistration extends Model
 
     protected $fillable = [
         'membership_number',
+        'student_id',
         'full_name',
         'email',
         'phone',
@@ -30,6 +31,9 @@ class ConferenceRegistration extends Model
         'check_in_time',
         'concession_eligible',
         'concession_applied',
+        'registration_fee',
+        'lunch_fee',
+        'total_amount',
     ];
 
     protected $casts = [
@@ -50,8 +54,10 @@ class ConferenceRegistration extends Model
     {
         return match($this->category) {
             'slia_member' => 'SLIA Member',
+            'student' => 'Student',
             'general_public' => 'General Public',
             'international' => 'International',
+            'test_user' => 'Test User',
             default => 'Unknown',
         };
     }

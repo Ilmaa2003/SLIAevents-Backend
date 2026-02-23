@@ -2,6 +2,8 @@
 
 namespace App\Jobs;
 
+use App\Mail\ConferenceRegistrationMail;
+use App\Models\ConferenceRegistration;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -10,14 +12,13 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Log;
 use Barryvdh\DomPDF\Facade\Pdf;
-use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
-class SendInaugurationPassEmail implements ShouldQueue
+class SendConferencePassEmail implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public $tries = 3;
-    public $backoff = [60, 300, 600]; // Retry after 1, 5, 10 minutes
+    public $backoff = [60, 300, 600];
     public $timeout = 60;
     public $failOnTimeout = false;
 
@@ -35,71 +36,74 @@ class SendInaugurationPassEmail implements ShouldQueue
     public function handle()
     {
         try {
-            // Regenerate PDF (in case of queue delay)
-            // Ensure all required variables for pdf.inauguration-pass are passed
-            $pdf = Pdf::loadView('pdf.inauguration-pass', [
-                'registration_id' => $this->registrationId,
+            // Find the registration model for the view
+            $registration = ConferenceRegistration::find($this->registrationId);
+            if (!$registration) {
+                Log::error('Conference registration not found in job: ' . $this->registrationId);
+                return;
+            }
+
+            // Generate PDF
+            $pdf = Pdf::loadView('pdf.conference-pass', [
+                'registration' => $registration,
+                'qrCode' => $this->qrCode,
                 'membership' => $this->registrationData['membership_number'],
                 'name' => $this->registrationData['full_name'],
                 'email' => $this->registrationData['email'],
-                'mobile' => $this->registrationData['mobile'],
-                'meal_preference' => $this->registrationData['meal_preference'],
-                'qr' => $this->qrCode,
-                'date' => now()->format('F j, Y'),
-                'time' => now()->format('h:i A'),
-                'event_name' => 'Inauguration Ceremony',
-                'event_date' => 'January 25, 2025',
-                'event_time' => '9:00 AM - 12:00 PM',
-                'venue' => 'Main Auditorium, SLIA Headquarters'
+                'phone' => $this->registrationData['mobile'],
+                'category' => $registration->category,
+                'date' => $registration->created_at->format('F j, Y'),
+                'time' => $registration->created_at->format('h:i A'),
             ]);
 
             $pdfContent = $pdf->output();
 
-            // Send email using the correct view (emails.inauguration-pass)
-            // Note: The template emails.inauguration-pass uses $name and $membership
-            Mail::send('emails.inauguration-pass', [
+            // Send email using closure style (Reverted to working pattern)
+            $identifier = $registration->membership_number 
+                        ?? $registration->student_id 
+                        ?? $registration->nic_passport 
+                        ?? $registration->id;
+
+            Mail::send('emails.conference-registration', [
+                'registration' => $registration,
                 'name' => $this->registrationData['full_name'],
                 'membership' => $this->registrationData['membership_number'],
                 'email' => $this->registrationData['email'],
-                'meal_preference' => $this->registrationData['meal_preference'],
-                'registration_date' => now()->format('F j, Y'),
-                'registration_time' => now()->format('h:i A'),
-                'event_date' => 'January 25, 2025',
-                'event_time' => '9:00 AM - 12:00 PM',
-                'venue' => 'Main Auditorium, SLIA Headquarters'
-            ], function ($message) use ($pdfContent) {
+                'qrCode' => $this->qrCode
+            ], function ($message) use ($registration, $pdfContent, $identifier) {
                 $message->to($this->registrationData['email'])
-                        ->subject('Inauguration Registration Confirmation & Attendance Pass');
+                        ->subject('SLIA Conference 2026 - Registration Confirmation');
                 
-                if ($ccEmail = env('MAIL_ALWAYS_CC')) {
+                if ($ccEmail = env('MAIL_ALWAYS_CC', 'sliaanualevents@gmail.com')) {
                     $message->cc($ccEmail);
                 }
 
                 $message->attachData($pdfContent, 
-                            'Inauguration-Registration-Pass-' . $this->registrationData['membership_number'] . '.pdf',
+                            'Conference-Pass-' . $identifier . '.pdf',
                             ['mime' => 'application/pdf']
+                        );
+
+                // Decode and attach QR as PNG
+                $qrData = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $this->qrCode));
+                $message->attachData($qrData, 
+                            'QR-Code-' . $identifier . '.png',
+                            ['mime' => 'image/png']
                         );
             });
 
-            Log::info('Queued email sent successfully', [
-                'registration_id' => $this->registrationId,
-                'email' => $this->registrationData['email'],
-                'queue_time' => now()->toDateTimeString()
-            ]);
+            Log::info('Conference Queued email sent successfully', ['registration_id' => $this->registrationId]);
 
         } catch (\Exception $e) {
-            Log::error('Queue job failed: ' . $e->getMessage(), [
+            Log::error('Conference Queue job failed: ' . $e->getMessage(), [
                 'registration_id' => $this->registrationId,
-                'email' => $this->registrationData['email'] ?? 'unknown',
                 'attempt' => $this->attempts()
             ]);
-            
-            // If failed all attempts, send admin alert
+
             if ($this->attempts() >= $this->tries) {
                 $this->sendFailureAlert();
             }
-            
-            throw $e; // Let Laravel handle retry
+
+            throw $e;
         }
     }
 
@@ -109,18 +113,17 @@ class SendInaugurationPassEmail implements ShouldQueue
             $adminEmail = env('ADMIN_EMAIL', 'sliaanualevents@gmail.com');
             
             if ($adminEmail) {
-                // Check if registrationData has keys, fallback if strict array access fails
                 $email = $this->registrationData['email'] ?? 'unknown';
                 $membership = $this->registrationData['membership_number'] ?? 'unknown';
 
-                Mail::raw("Queued email delivery failed after {$this->tries} attempts.\n\n" .
+                Mail::raw("Conference Queued email delivery failed after {$this->tries} attempts.\n\n" .
                          "Registration ID: {$this->registrationId}\n" .
                          "Email: {$email}\n" .
                          "Membership: {$membership}\n" .
                          "Failed at: " . now()->toDateTimeString(),
                     function ($message) use ($adminEmail) {
                         $message->to($adminEmail)
-                                ->subject('[URGENT] Email Queue Delivery Failed');
+                                ->subject('[URGENT] Conference Email Queue Delivery Failed');
                     }
                 );
             }

@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fellowship Registration Payment Test</title>
+    <style>
+        body { font-family: Arial; padding: 20px; max-width: 600px; margin: 0 auto; }
+        input, button { padding: 10px; margin: 5px 0; width: 100%; box-sizing: border-box; }
+        button { background: #4F46E5; color: white; border: none; cursor: pointer; }
+        button:hover { background: #4338CA; }
+        .response { background: #f5f5f5; padding: 15px; margin: 15px 0; border-radius: 5px; }
+        .error { background: #fee; color: #c00; }
+        .success { background: #efe; color: #060; }
+        label { display: block; margin-top: 10px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Fellowship Payment Test</h1>
+    <p>This page tests the payment gateway integration</p>
+
+    <label>Full Name:</label>
+    <input type="text" id="fullName" value="Test User" />
+
+    <label>Email:</label>
+    <input type="email" id="email" value="test@example.com" />
+
+    <label>Phone:</label>
+    <input type="text" id="phone" value="0771234567" />
+
+    <label>Category:</label>
+    <select id="category">
+        <option value="test_user">Test User (LKR 10)</option>
+        <option value="slia_member">SLIA Member (LKR 3,500)</option>
+        <option value="general_public">General Public (LKR 12,000)</option>
+    </select>
+
+    <label>Membership Number (optional):</label>
+    <input type="text" id="membershipNo" value="TEST123" />
+
+    <label>NIC/Passport (for non-members):</label>
+    <input type="text" id="nicPassport" value="123456789V" />
+    
+    <br><br>
+    <button onclick="testPayment()">Test Payment Initiation</button>
+
+    <div id="response"></div>
+
+    <script>
+        const API_URL = 'http://localhost:8000/api/fellowship/initiate-payment';
+
+        async function testPayment() {
+            const responseDiv = document.getElementById('response');
+            responseDiv.innerHTML = '<p>Loading...</p>';
+            
+            const category = document.getElementById('category').value;
+            let fee = 10;
+            if (category === 'slia_member') fee = 3500;
+            if (category === 'general_public') fee = 12000;
+
+            const payload = {
+                membership_number: document.getElementById('membershipNo').value || null,
+                full_name: document.getElementById('fullName').value,
+                email: document.getElementById('email').value,
+                mobile: document.getElementById('phone').value,
+                nic_passport: document.getElementById('nicPassport').value || null,
+                category: category,
+                registration_fee: fee,
+                total_amount: fee
+            };
+
+            console.log('Sending request to:', API_URL);
+            console.log('Payload:', payload);
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                console.log('Response status:', response.status);
+                const data = await response.json();
+                console.log('Response data:', data);
+
+                if (data.success && data.payment_url) {
+                    responseDiv.innerHTML = `
+                        <div class="response success">
+                            <h3>✅ Success!</h3>
+                            <p><strong>Registration ID:</strong> ${data.registration_id}</p>
+                            <p><strong>Payment URL:</strong> <a href="${data.payment_url}" target="_blank">${data.payment_url}</a></p>
+                            <button onclick="window.location.href='${data.payment_url}'">Go to Payment Gateway</button>
+                        </div>
+                    `;
+                } else {
+                    responseDiv.innerHTML = `
+                        <div class="response error">
+                            <h3>❌ Error</h3>
+                            <p>${data.message || 'Payment initiation failed'}</p>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                responseDiv.innerHTML = `
+                    <div class="response error">
+                        <h3>❌ Network Error</h3>
+                        <p>${error.message}</p>
+                        <p>Make sure Laravel backend is running on localhost:8000</p>
+                    </div>
+                `;
+            }
+        }
+    </script>
+</body>
+</html>

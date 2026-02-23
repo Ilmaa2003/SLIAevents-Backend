@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Barryvdh\DomPDF\Facade\Pdf;
 use SimpleSoftwareIO\QrCode\Facades\QrCode;
+use App\Jobs\SendExhibitionPassEmail;
 
 class ExhibitionRegistrationController extends Controller
 {
@@ -157,31 +158,13 @@ class ExhibitionRegistrationController extends Controller
 
             $pdfContent = $pdf->output();
 
-            $emailSent = false;
-            Log::info('Attempting to send exhibition email to: ' . $data['email']);
-            
+            // Dispatch Email Job (Async)
             try {
-                Mail::send('emails.exhibition-pass', [
-                    'name' => $data['full_name'],
-                    'membership' => $membership_number,
-                    'email' => $data['email'],
-                    'date' => now()->format('F j, Y'),
-                    'time' => now()->format('h:i A'),
-                    'event_name' => 'SLIA Annual Exhibition 2026'
-                ], function ($message) use ($data, $pdfContent) {
-                    $message->to($data['email'])
-                            ->subject('SLIA Exhibition - Your Entry Pass & Registration Confirmation')
-                            ->attachData($pdfContent, 
-                                'SLIA-Exhibition-Pass-' . $data['membership_number'] . '.pdf',
-                                ['mime' => 'application/pdf']
-                            );
-                });
-                
+                SendExhibitionPassEmail::dispatch($data, $qrCode, $registration->id);
                 $emailSent = true;
-                Log::info('Exhibition email sent successfully to: ' . $data['email']);
-                
+                Log::info('Exhibition Email Job dispatched for: ' . $data['email']);
             } catch (\Exception $e) {
-                Log::error('Exhibition email sending failed: ' . $e->getMessage(), ['email' => $data['email']]);
+                Log::error('Failed to dispatch exhibition email job: ' . $e->getMessage());
                 $emailSent = false;
             }
 
@@ -438,27 +421,20 @@ class ExhibitionRegistrationController extends Controller
 
             $pdfContent = $pdf->output();
 
-            Mail::send('emails.exhibition-pass-resend', [
-                'name' => $registration->full_name,
-                'membership' => $membership_number,
-                'attended' => $registration->attended,
-                'meal_received' => $registration->meal_received,
-                'date' => now()->format('F j, Y'),
-                'time' => now()->format('h:i A'),
-                'event_name' => 'SLIA Annual Exhibition 2026'
-            ], function ($message) use ($registration, $pdfContent) {
-                $message->to($registration->email)
-                        ->subject('SLIA Exhibition Entry Pass (Resent)')
-                        ->attachData($pdfContent, 
-                            'SLIA-Exhibition-Pass-' . $registration->membership_number . '.pdf'
-                        );
-            });
+            // Dispatch Email Job for resend (Async)
+            try {
+                SendExhibitionPassEmail::dispatch($data, $qrCode, $registration->id);
+                $jobDispatched = true;
+            } catch (\Exception $e) {
+                Log::error('Exhibition resend job failed: ' . $e->getMessage());
+                $jobDispatched = false;
+            }
 
-            Log::info('Exhibition email resent successfully to: ' . $registration->email);
+            Log::info('Exhibition email resend job dispatched: ' . $registration->email);
 
             return response()->json([
                 'success' => true,
-                'message' => 'Exhibition entry pass has been resent to your email.'
+                'message' => 'Exhibition entry pass has been queued for resending to your email.'
             ]);
 
         } catch (\Exception $e) {
@@ -792,18 +768,19 @@ class ExhibitionRegistrationController extends Controller
                 ], 404);
             }
 
-            Log::info('Deleting exhibition registration', [
-                'id' => $registration->id,
-                'membership_number' => $registration->membership_number,
-                'name' => $registration->full_name
-            ]);
-
+            $identifier = $registration->membership_number ?? $registration->email ?? 'N/A';
             $registration->delete();
+
+            Log::warning('Exhibition Registration deleted', [
+                'identifier' => $identifier,
+                'registration_id' => $id,
+                'deleted_by' => auth()->id() ?? 'admin'
+            ]);
 
             return response()->json([
                 'success' => true,
                 'message' => 'Exhibition registration deleted successfully.'
-            ]);
+            ], 200);
 
         } catch (\Exception $e) {
             Log::error('Delete exhibition registration failed: ' . $e->getMessage());

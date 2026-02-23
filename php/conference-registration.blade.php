@@ -100,31 +100,15 @@
                 <span class="detail-label">Name:</span>
                 <span>{{ $registration->full_name }}</span>
             </div>
-            @if($registration->membership_number)
             <div class="detail-item">
                 <span class="detail-label">Membership No:</span>
                 <span>{{ $registration->membership_number }}</span>
             </div>
-            @endif
-            @if($registration->student_id)
-            <div class="detail-item">
-                <span class="detail-label">Student ID:</span>
-                <span>{{ $registration->student_id }}</span>
-            </div>
-            @endif
-            @if($registration->nic_passport)
-            <div class="detail-item">
-                <span class="detail-label">NIC / Passport:</span>
-                <span>{{ $registration->nic_passport }}</span>
-            </div>
-            @endif
             <div class="detail-item">
                 <span class="detail-label">Category:</span>
                 <span>
                     @if($registration->category == 'slia_member')
                         SLIA Member
-                    @elseif($registration->category == 'student')
-                        Student
                     @elseif($registration->category == 'general_public')
                         General Public
                     @else
@@ -146,14 +130,6 @@
             </div>
         </div>
         
-        @if(isset($qrCode))
-        <div style="text-align: center; margin: 25px 0; padding: 15px; background: white; border: 2px dashed #1e40af; border-radius: 10px; display: inline-block; width: 100%; box-sizing: border-box;">
-            <h4 style="color: #1e40af; margin-top: 0; margin-bottom: 10px;">Your QR Check-in Pass</h4>
-            <img src="{{ $qrCode }}" alt="QR Code" style="width: 200px; height: 200px; border: 1px solid #eee;">
-            <p style="font-size: 12px; color: #6b7280; margin-top: 10px; margin-bottom: 0;">Scan this at the registration desk</p>
-        </div>
-        @endif
-        
         <div class="important-note">
             <h4 style="color: #92400e; margin-top: 0;">Important Information</h4>
             <p>Your Conference Pass is attached to this email as a PDF file. Please:</p>
@@ -167,6 +143,22 @@
             </ul>
         </div>
         
+        <div style="text-align: center;">
+            <h3 style="color: #1e40af;">Conference Details</h3>
+            <p><strong>Date:</strong> January 28, 2026</p>
+            <p><strong>Time:</strong> 8:30 AM - 5:00 PM</p>
+            <p><strong>Venue:</strong> Colombo Convention Center</p>
+            <p><strong>Address:</strong> 123 Convention Street, Colombo 01</p>
+        </div>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <p>For any inquiries or assistance, please contact:</p>
+            <p>
+                <strong>SLIA Conference Secretariat</strong><br>
+                Email: conference@slia.lk<br>
+                Phone: +94 11 2 345 678
+            </p>
+        </div>
     </div>
     
     <div class="footer">

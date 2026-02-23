@@ -185,19 +185,8 @@
                         <div class="info-value">{{ $registration->full_name }}</div>
                     </div>
                     <div class="info-item">
-                        @if($registration->membership_number)
-                            <span class="info-label">Membership Number</span>
-                            <div class="info-value">{{ $registration->membership_number }}</div>
-                        @elseif($registration->student_id)
-                            <span class="info-label">Student ID</span>
-                            <div class="info-value">{{ $registration->student_id }}</div>
-                        @elseif($registration->nic_passport)
-                            <span class="info-label">NIC / Passport</span>
-                            <div class="info-value">{{ $registration->nic_passport }}</div>
-                        @else
-                            <span class="info-label">Reference ID</span>
-                            <div class="info-value">#{{ str_pad($registration->id, 5, '0', STR_PAD_LEFT) }}</div>
-                        @endif
+                        <span class="info-label">Membership Number</span>
+                        <div class="info-value">{{ $registration->membership_number }}</div>
                     </div>
                     <div class="info-item">
                         <span class="info-label">Email Address</span>
@@ -212,8 +201,6 @@
                         <div class="info-value">
                             @if($registration->category == 'slia_member')
                                 SLIA Member (Special Rate)
-                            @elseif($registration->category == 'student')
-                                Student (SLIA Student/Graduate Member)
                             @elseif($registration->category == 'general_public')
                                 General Public
                             @else
@@ -240,7 +227,7 @@
                     <ul>
                         <li>Please bring this pass (printed or digital) to the conference venue</li>
                         <li>This pass is required for entry and food collection</li>
-                        <li>NIC/Passport/Student ID/Membership Number verification may be required at the entrance</li>
+                        <li>ID verification may be required at the entrance</li>
                         <li>Keep this pass safe - it cannot be replaced if lost</li>
                         @if($registration->include_lunch)
                             <li>Present this pass at the lunch counter to collect your meal</li>
@@ -255,9 +242,12 @@
                     Scan this QR code at the registration desk
                 </p>
                 <div class="qr-code">
-                    <img src="{{ $qrCode }}" alt="QR Code">
+                    {!! $qrCode !!}
                 </div>
-               
+                <div style="font-size: 12px; color: #6b7280; margin-top: 10px;">
+                    Conference Date: January 28, 2026<br>
+                    Venue: Colombo Convention Center
+                </div>
             </div>
         </div>
         
@@ -265,7 +255,7 @@
             <p>
                 <strong>Sri Lanka Institute of Architects</strong><br>
                 Conference Registration System<br>
-                For assistance, contact: sliaoffice2@gmail.com | +94 77 764 6289
+                For assistance, contact: conference@slia.lk | +94 11 2 345 678
             </p>
             <p style="font-size: 11px; margin-top: 10px;">
                 This is an electronically generated pass. No signature required.<br>
