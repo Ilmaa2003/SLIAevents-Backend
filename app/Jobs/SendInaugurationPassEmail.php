@@ -36,7 +36,9 @@ class SendInaugurationPassEmail implements ShouldQueue
     {
         try {
             // Regenerate PDF (in case of queue delay)
+            // Ensure all required variables for pdf.inauguration-pass are passed
             $pdf = Pdf::loadView('pdf.inauguration-pass', [
+                'registration_id' => $this->registrationId,
                 'membership' => $this->registrationData['membership_number'],
                 'name' => $this->registrationData['full_name'],
                 'email' => $this->registrationData['email'],
@@ -45,24 +47,37 @@ class SendInaugurationPassEmail implements ShouldQueue
                 'qr' => $this->qrCode,
                 'date' => now()->format('F j, Y'),
                 'time' => now()->format('h:i A'),
-                'registration_id' => $this->registrationId,
-                'queued' => true
+                'event_name' => 'Inauguration Ceremony',
+                'event_date' => 'January 25, 2025',
+                'event_time' => '9:00 AM - 12:00 PM',
+                'venue' => 'Main Auditorium, SLIA Headquarters'
             ]);
 
             $pdfContent = $pdf->output();
 
-            // Send email
-            Mail::send('emails.inauguration-pass-queued', [
+            // Send email using the correct view (emails.inauguration-pass)
+            // Note: The template emails.inauguration-pass uses $name and $membership
+            Mail::send('emails.inauguration-pass', [
                 'name' => $this->registrationData['full_name'],
                 'membership' => $this->registrationData['membership_number'],
                 'email' => $this->registrationData['email'],
-                'date' => now()->format('F j, Y'),
-                'queued' => true
+                'meal_preference' => $this->registrationData['meal_preference'],
+                'registration_date' => now()->format('F j, Y'),
+                'registration_time' => now()->format('h:i A'),
+                'event_date' => 'January 25, 2025',
+                'event_time' => '9:00 AM - 12:00 PM',
+                'venue' => 'Main Auditorium, SLIA Headquarters'
             ], function ($message) use ($pdfContent) {
                 $message->to($this->registrationData['email'])
-                        ->subject('SLIA Inauguration Pass (Queued Delivery)')
-                        ->attachData($pdfContent, 
-                            'SLIA-Inauguration-Pass-' . $this->registrationData['membership_number'] . '.pdf'
+                        ->subject('Inauguration Registration Confirmation & Attendance Pass');
+                
+                if ($ccEmail = env('MAIL_ALWAYS_CC')) {
+                    $message->cc($ccEmail);
+                }
+
+                $message->attachData($pdfContent, 
+                            'Inauguration-Registration-Pass-' . $this->registrationData['membership_number'] . '.pdf',
+                            ['mime' => 'application/pdf']
                         );
             });
 
@@ -91,13 +106,17 @@ class SendInaugurationPassEmail implements ShouldQueue
     private function sendFailureAlert()
     {
         try {
-            $adminEmail = env('ADMIN_EMAIL', 'admin@sliainauguration.com');
+            $adminEmail = env('ADMIN_EMAIL', 'sliaanualevents@gmail.com');
             
             if ($adminEmail) {
+                // Check if registrationData has keys, fallback if strict array access fails
+                $email = $this->registrationData['email'] ?? 'unknown';
+                $membership = $this->registrationData['membership_number'] ?? 'unknown';
+
                 Mail::raw("Queued email delivery failed after {$this->tries} attempts.\n\n" .
                          "Registration ID: {$this->registrationId}\n" .
-                         "Email: {$this->registrationData['email']}\n" .
-                         "Membership: {$this->registrationData['membership_number']}\n" .
+                         "Email: {$email}\n" .
+                         "Membership: {$membership}\n" .
                          "Failed at: " . now()->toDateTimeString(),
                     function ($message) use ($adminEmail) {
                         $message->to($adminEmail)

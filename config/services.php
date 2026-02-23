@@ -31,4 +31,14 @@ return [
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
 
+
+    
+'paycorp' => [
+    'endpoint' => env('PAYCORP_ENDPOINT', 'https://secure.paycorp.lk/rest/service/proxy'),
+    'client_id' => env('PAYCORP_CLIENT_ID'),
+    'auth_token' => env('PAYCORP_AUTH_TOKEN'),
+    'hmac_secret' => env('PAYCORP_HMAC_SECRET'),
+    'test_mode' => env('PAYCORP_TEST_MODE', false),
+],
+
 ];

@@ -16,6 +16,7 @@ class ExhibitionRegistration extends Model
         'full_name',
         'email',
         'mobile',
+        'meal_preference',
         'attended',
         'meal_received',
         'check_in_time',

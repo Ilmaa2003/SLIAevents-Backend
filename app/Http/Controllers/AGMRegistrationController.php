@@ -11,6 +11,8 @@ use Illuminate\Support\Facades\Validator;
 use Barryvdh\DomPDF\Facade\Pdf;
 use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
+use App\Jobs\SendAGMPassEmail;
+
 class AGMRegistrationController extends Controller
 {
     /**
@@ -129,17 +131,9 @@ class AGMRegistrationController extends Controller
             Log::info('AGM Registration created with ID: ' . $registration->id);
 
             $qrContent = json_encode([
-                'id' => $registration->id,
                 'membership' => $membership_number,
-                'name' => $data['full_name'],
-                'email' => $data['email'],
-                'meal' => $data['meal_preference'],
-                'timestamp' => now()->timestamp,
-                'event' => 'Annual General Meeting',
-                'event_date' => '2024',
-                'type' => 'agm_registration',
-                'attended' => false,
-                'meal_received' => false
+                'id' => $registration->id,
+                'type' => 'agm_registration'
             ]);
             
             Log::info('Generating AGM QR code...');
@@ -156,56 +150,15 @@ class AGMRegistrationController extends Controller
             
             Log::info('AGM QR code generated successfully');
 
-            Log::info('Generating AGM PDF...');
-            $pdf = Pdf::loadView('pdf.agm-pass', [
-                'membership' => $membership_number,
-                'name' => $data['full_name'],
-                'email' => $data['email'],
-                'mobile' => $data['mobile'],
-                'meal_preference' => $data['meal_preference'],
-                'qr' => $qrCode,
-                'date' => now()->format('F j, Y'),
-                'time' => now()->format('h:i A'),
-                'registration_id' => $registration->id,
-                'event_name' => 'Annual General Meeting',
-                'event_date' => 'December 15, 2024',
-                'event_time' => '10:00 AM - 2:00 PM',
-                'venue' => 'Main Auditorium, Conference Center',
-                'attended' => false,
-                'meal_received' => false
-            ]);
+            Log::info('AGM QR code generated successfully');
 
-            $pdfContent = $pdf->output();
-            Log::info('AGM PDF generated successfully');
-
-            $emailSent = false;
-            Log::info('Attempting to send AGM email to: ' . $data['email']);
-            
+            // Dispatch Email Job (Async)
             try {
-                Mail::send('emails.agm-pass', [
-                    'name' => $data['full_name'],
-                    'membership' => $membership_number,
-                    'email' => $data['email'],
-                    'meal_preference' => $data['meal_preference'],
-                    'registration_date' => now()->format('F j, Y'),
-                    'registration_time' => now()->format('h:i A'),
-                    'event_date' => 'December 15, 2024',
-                    'event_time' => '10:00 AM - 2:00 PM',
-                    'venue' => 'Main Auditorium, Conference Center'
-                ], function ($message) use ($data, $pdfContent) {
-                    $message->to($data['email'])
-                            ->subject('AGM Registration Confirmation & Attendance Pass')
-                            ->attachData($pdfContent, 
-                                'AGM-Registration-Pass-' . $data['membership_number'] . '.pdf',
-                                ['mime' => 'application/pdf']
-                            );
-                });
-                
+                SendAGMPassEmail::dispatch($data, $qrCode, $registration->id);
                 $emailSent = true;
-                Log::info('AGM Email sent successfully to: ' . $data['email']);
-                
+                Log::info('AGM Email Job dispatched for: ' . $data['email']);
             } catch (\Exception $e) {
-                Log::error('AGM Email sending failed: ' . $e->getMessage(), ['email' => $data['email']]);
+                Log::error('Failed to dispatch AGM email job: ' . $e->getMessage());
                 $emailSent = false;
             }
 
@@ -487,8 +440,13 @@ class AGMRegistrationController extends Controller
                 'venue' => 'Main Auditorium, Conference Center'
             ], function ($message) use ($registration, $pdfContent) {
                 $message->to($registration->email)
-                        ->subject('AGM Attendance Pass (Resent)')
-                        ->attachData($pdfContent, 
+                        ->subject('AGM Attendance Pass (Resent)');
+
+                if ($ccEmail = env('MAIL_ALWAYS_CC')) {
+                    $message->cc($ccEmail);
+                }
+
+                $message->attachData($pdfContent, 
                             'AGM-Registration-Pass-' . $registration->membership_number . '.pdf'
                         );
             });
@@ -634,7 +592,11 @@ class AGMRegistrationController extends Controller
             $mealReceived = $request->get('meal_received');
             $search = $request->get('search');
 
-            $query = AGMRegistration::query();
+            $query = DB::table('agm_registrations')->select([
+                'id', 'membership_number', 'full_name', 'email', 'mobile', 
+                'attended', 'meal_received', 'meal_preference',
+                'created_at', 'updated_at'
+            ]);
 
             if ($attended !== null) {
                 $query->where('attended', filter_var($attended, FILTER_VALIDATE_BOOLEAN));
@@ -820,12 +782,13 @@ class AGMRegistrationController extends Controller
                 ], 404);
             }
 
-            $membership_number = $registration->membership_number;
+            $identifier = $registration->membership_number ?? $registration->email ?? 'N/A';
             $registration->delete();
 
-            Log::warning('AGM Registration deleted for: ' . $membership_number, [
+            Log::warning('AGM Registration deleted', [
+                'identifier' => $identifier,
                 'registration_id' => $id,
-                'deleted_by' => auth()->id() ?? 'system'
+                'deleted_by' => auth()->id() ?? 'admin'
             ]);
 
             return response()->json([

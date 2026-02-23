@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Models\ConferenceRegistration;
+use App\Services\PaycorpService;
+use App\Services\SampathPaymentService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Log;
@@ -10,27 +12,24 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Barryvdh\DomPDF\Facade\Pdf;
 use SimpleSoftwareIO\QrCode\Facades\QrCode;
-use Illuminate\Support\Str;
-use Illuminate\Support\Facades\Http;
+use App\Mail\ConferenceRegistrationMail;
+use App\Mail\ManualEntryNotificationMail;
+use App\Jobs\SendConferencePassEmail;
+use App\Models\FellowshipRegistration;
 
 class ConferenceRegistrationController extends Controller
 {
-    // Sampath Bank Payment Gateway Config
-    private $sampathConfig = [
-        'merchant_id' => env('SAMPATH_MERCHANT_ID', 'TESTMERCHANT'),
-        'merchant_key' => env('SAMPATH_MERCHANT_KEY', ''),
-        'currency' => 'LKR',
-        'return_url' => '/conference/payment/callback', // Your callback URL
-        'cancel_url' => '/conference/payment/cancel',
-        'notify_url' => '/conference/payment/notify',
-        'test_mode' => env('SAMPATH_TEST_MODE', true),
-        'api_endpoint' => env('SAMPATH_TEST_MODE', true) 
-            ? 'https://test.sampath.lk/ipgtest/v1/payment/initiate' 
-            : 'https://sampath.lk/ipg/v1/payment/initiate',
-    ];
+    protected $paycorpService;
+    protected $sampathPaymentService;
+
+    public function __construct()
+    {
+        $this->paycorpService = new PaycorpService();
+        $this->sampathPaymentService = new SampathPaymentService();
+    }
 
     /**
-     * Verify membership number for conference
+     * Verify membership number for Conference
      */
     public function verifyMember($membership_number)
     {
@@ -44,18 +43,22 @@ class ConferenceRegistrationController extends Controller
                 ], 400);
             }
 
-            // Check if already registered for conference
             $existing = ConferenceRegistration::where('membership_number', $membership_number)->first();
-            if ($existing) {
+            
+            // Only block if payment is COMPLETED
+            if ($existing && $existing->payment_status === 'completed') {
                 return response()->json([
                     'status' => 'already_registered',
-                    'message' => 'This membership has already been registered for the conference.',
+                    'message' => 'This membership has already been registered and paid for the Conference.',
                     'registered_at' => $existing->created_at->format('Y-m-d H:i:s'),
-                    'existing_email' => $existing->email
+                    'existing_email' => $existing->email,
+                    'attended' => $existing->attended,
+                    'food_received' => $existing->food_received,
+                    'category' => $existing->category,
+                    'payment_ref_no' => $existing->payment_ref_no
                 ]);
             }
 
-            // Verify in member database
             $member = DB::table('member_details')
                 ->where('membership_no', $membership_number)
                 ->first();
@@ -63,7 +66,7 @@ class ConferenceRegistrationController extends Controller
             if (!$member) {
                 return response()->json([
                     'status' => 'invalid_member',
-                    'message' => 'Membership number not found.'
+                    'message' => 'Membership number not found in records.'
                 ], 404);
             }
 
@@ -71,369 +74,314 @@ class ConferenceRegistrationController extends Controller
                 'status' => 'valid',
                 'member' => [
                     'full_name' => $member->full_name ?? '',
-                    'email' => $member->personal_email ?? ($member->official_email ?? ''),
-                    'mobile' => $member->personal_mobilenumber ?? ($member->official_mobilenumber ?? ''),
-                    'nic' => $member->nic_number ?? ''
                 ],
-                'discount' => true // 50% discount for conference
+                'discount_eligible' => true,
+                'discount_percentage' => 50,
+                'message' => 'SLIA Member - Eligible for special rate of LKR 5,000'
             ]);
 
         } catch (\Exception $e) {
             Log::error('Conference Verification error: ' . $e->getMessage());
             return response()->json([
                 'status' => 'error',
-                'message' => 'Unable to verify membership. Please try again.'
+                'message' => 'Unable to verify membership for Conference. Please try again.'
             ], 500);
         }
     }
 
     /**
-     * Calculate conference fees
+     * Validate student ID format and uniqueness
      */
-    private function calculateConferenceFees($category, $includeLunch = false)
+    public function validateStudentId(Request $request)
     {
-        $baseFees = [
-            'slia_member' => 5000,    // After 50% discount
-            'general_public' => 10000,
-            'international' => 15000, // USD 50 equivalent
-        ];
+        try {
+            $studentId = strtoupper(trim($request->input('student_id', '')));
+            
+            if (empty($studentId)) {
+                return response()->json([
+                    'valid' => false,
+                    'message' => 'Student ID is required'
+                ]);
+            }
 
-        $lunchFee = $includeLunch ? 10000 : 0;
-        $baseFee = $baseFees[$category] ?? 10000;
-        
-        // Note: According to your document, tax is added later
-        return [
-            'base_fee' => $baseFee,
-            'lunch_fee' => $lunchFee,
-            'total_amount' => $baseFee + $lunchFee,
-            'currency' => 'LKR',
-            'category' => $category,
-            'include_lunch' => $includeLunch,
-        ];
+            // Minimum length check
+            if (strlen($studentId) < 3) {
+                return response()->json([
+                    'valid' => false,
+                    'message' => 'Student ID must be at least 3 characters'
+                ]);
+            }
+            
+            // Validate format: block capitals only (A-Z, 0-9), no symbols
+            if (!preg_match('/^[A-Z0-9]+$/', $studentId)) {
+                return response()->json([
+                    'valid' => false,
+                    'message' => 'Student ID must contain only BLOCK CAPITALS (A-Z, 0-9) - no symbols allowed'
+                ]);
+            }
+            
+            // Check uniqueness in database - Only block if payment is COMPLETED
+            $existing = ConferenceRegistration::where('student_id', $studentId)->first();
+            
+            if ($existing && $existing->payment_status === 'completed') {
+                return response()->json([
+                    'valid' => false,
+                    'message' => 'This Student ID is already registered and paid for the conference'
+                ]);
+            }
+
+            return response()->json([
+                'valid' => true,
+                'message' => 'Student ID is available',
+                'student_id' => $studentId
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Student ID validation error: ' . $e->getMessage());
+            return response()->json([
+                'valid' => false,
+                'message' => 'Unable to validate Student ID. Please try again.'
+            ], 500);
+        }
     }
 
     /**
-     * Initialize Sampath payment
+     * Handle Conference registration with payment initiation
      */
     public function initiatePayment(Request $request)
     {
+        Log::info('Conference Registration attempt started', $request->all());
+        
         $validator = Validator::make($request->all(), [
-            'membership_number' => 'nullable|string',
+            'membership_number' => 'nullable|string|max:50', // Nullable for general/international
+            'student_id' => 'required_if:category,student|nullable|string|max:50',
             'full_name' => 'required|string|max:255',
             'email' => 'required|email|max:255',
-            'phone' => 'required|string|max:20',
+            'mobile' => 'required|string|max:20',
             'nic_passport' => 'nullable|string|max:50',
-            'category' => 'required|in:slia_member,general_public,international',
-            'include_lunch' => 'boolean',
+            'category' => 'required|in:slia_member,student,general_public,international,licentiate,test_user',
+            'include_lunch' => 'boolean|nullable',
+            'meal_preference' => 'nullable|in:veg,non_veg',
+            'registration_fee' => 'required|numeric|min:0',
+            'lunch_fee' => 'required|numeric|min:0',
+            'total_amount' => 'required|numeric|min:0',
         ]);
 
         if ($validator->fails()) {
+            Log::error('Conference Validation failed', [
+                'errors' => $validator->errors()->toArray(),
+                'input' => $request->all()
+            ]);
             return response()->json([
                 'success' => false,
-                'message' => 'Validation failed.',
+                'message' => 'Please check your input data.',
                 'errors' => $validator->errors()
             ], 422);
         }
 
         $data = $validator->validated();
-        $membership_number = isset($data['membership_number']) ? trim(strtoupper($data['membership_number'])) : null;
+        
+        // Determine identifiers
+        $membershipNumber = !empty($data['membership_number']) ? trim(strtoupper($data['membership_number'])) : null;
+        $studentId = !empty($data['student_id']) ? trim(strtoupper($data['student_id'])) : null;
+        $nicPassport = !empty($data['nic_passport']) ? trim(strtoupper($data['nic_passport'])) : null;
 
-        // Validate member for SLIA category
-        if ($data['category'] === 'slia_member' && empty($membership_number)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Membership number is required for SLIA members.'
-            ], 422);
+        Log::info('Processing Conference registration', [
+            'category' => $data['category'],
+            'membership' => $membershipNumber,
+            'student_id' => $studentId,
+            'nic' => $nicPassport
+        ]);
+
+        // Check for existing registration based on category
+        $existingQuery = ConferenceRegistration::query();
+        
+        if ($data['category'] === 'student' && $studentId) {
+            $existingQuery->where('student_id', $studentId);
+        } else if (($data['category'] === 'slia_member' || $data['category'] === 'licentiate') && $membershipNumber) {
+            $existingQuery->where('membership_number', $membershipNumber);
+        } else if (($data['category'] === 'general_public' || $data['category'] === 'international' || $data['category'] === 'test_user') && $nicPassport) {
+            $existingQuery->where('nic_passport', $nicPassport);
+        } else {
+             // Fallback: check email if no other unique ID is reliable
+             $existingQuery->where('email', $data['email']);
         }
-
-        // Check if already registered
-        if ($membership_number) {
-            $existing = ConferenceRegistration::where('membership_number', $membership_number)->first();
-            if ($existing) {
+        
+        $existing = $existingQuery->first();
+        
+        if ($existing) {
+            // CHECK PAYMENT STATUS
+            if ($existing->payment_status === 'completed') {
+                Log::warning('Conference Registration blocked - already paid', ['id' => $existing->id]);
                 return response()->json([
                     'success' => false,
-                    'message' => 'Already registered for conference.',
-                    'registered_at' => $existing->created_at->format('Y-m-d H:i:s')
-                ], 409);
+                    'message' => 'You have already registered and paid for the Conference.',
+                    'registered_date' => $existing->created_at->format('F j, Y, g:i a'),
+                    'status' => 'already_registered',
+                    'registration_id' => $existing->id,
+                    'existing_email' => $existing->email,
+                ], 200);
+            } else {
+                Log::info('Existing incomplete registration found. Updating record.', ['id' => $existing->id]);
+                // Allow update details and retry payment
+            }
+        }
+
+        // Membership verification is handled by the frontend; allowing manual registration
+        // if the member is not found in the database.
+        if (($data['category'] === 'slia_member' || $data['category'] === 'licentiate') && $membershipNumber) {
+            try {
+                $member = DB::table('member_details')
+                    ->where('membership_no', $membershipNumber)
+                    ->first();
+
+                if (!$member) {
+                    Log::info('Member not found in database for conference: ' . $membershipNumber . '. Sending notification alert.');
+                    
+                    $adminEmail = env('MAIL_ALWAYS_CC', 'sliaoffice2@gmail.com');
+                    Mail::to($adminEmail)->send(new ManualEntryNotificationMail(
+                        'National Conference',
+                        $membershipNumber,
+                        $data['full_name'],
+                        $data['email'],
+                        $data['mobile'],
+                        $data['meal_preference'] ?? 'N/A'
+                    ));
+                    
+                    Log::info('Manual entry notification alert sent to admin: ' . $adminEmail);
+                }
+            } catch (\Exception $e) {
+                Log::error('Manual entry notification alert failed: ' . $e->getMessage());
+                // Non-blocking: don't fail registration if notify email fails
             }
         }
 
         DB::beginTransaction();
         
         try {
-            // Calculate fees
-            $fees = $this->calculateConferenceFees(
-                $data['category'], 
-                $data['include_lunch'] ?? false
-            );
+            if ($existing) {
+                // UPDATE EXISTING RECORD
+                $registration = $existing;
+                $registration->update([
+                    'membership_number' => $membershipNumber,
+                    'student_id' => $studentId,
+                    'full_name' => trim($data['full_name']),
+                    'email' => trim($data['email']),
+                    'phone' => trim($data['mobile']),
+                    'category' => $data['category'],
+                    'nic_passport' => $nicPassport,
+                    'include_lunch' => $data['include_lunch'],
+                    'meal_preference' => $data['meal_preference'] ?? null,
+                    'registration_fee' => $data['registration_fee'],
+                    'lunch_fee' => $data['lunch_fee'],
+                    'total_amount' => $data['total_amount'],
+                    // Reset status if needed, but keep 'pending' until initiated
+                    'payment_status' => 'pending', 
+                    'payment_reqid' => null // Clear old request ID
+                ]);
+                Log::info('Conference Registration updated for ID: ' . $registration->id);
+            } else {
+                // CREATE NEW RECORD
+                Log::info('Creating Conference registration record...');
+                $registration = ConferenceRegistration::create([
+                    'membership_number' => $membershipNumber,
+                    'student_id' => $studentId,
+                    'full_name' => trim($data['full_name']),
+                    'email' => trim($data['email']),
+                    'phone' => trim($data['mobile']),
+                    'category' => $data['category'],
+                    'nic_passport' => $nicPassport,
+                    'include_lunch' => $data['include_lunch'],
+                    'meal_preference' => $data['meal_preference'] ?? null,
+                    'food_received' => false,
+                    'attended' => false,
+                    'payment_status' => 'pending',
+                    'registration_fee' => $data['registration_fee'],
+                    'lunch_fee' => $data['lunch_fee'],
+                    'total_amount' => $data['total_amount']
+                ]);
+                Log::info('Conference Registration created with ID: ' . $registration->id);
+            }
 
-            // Generate unique registration number
-            $registrationNumber = 'CONF' . date('Ymd') . Str::random(6);
-
-            // Create registration with pending payment
-            $registration = ConferenceRegistration::create([
-                'membership_number' => $membership_number,
-                'full_name' => $data['full_name'],
-                'email' => $data['email'],
-                'phone' => $data['phone'],
-                'category' => $data['category'],
-                'member_verified' => ($data['category'] === 'slia_member' && $membership_number) ? true : false,
-                'nic_passport' => $data['nic_passport'] ?? null,
-                'include_lunch' => $data['include_lunch'] ?? false,
-                'total_amount' => $fees['total_amount'],
-                'payment_status' => 'pending',
-                'concession_eligible' => ($data['category'] === 'slia_member') ? true : false,
-            ]);
-
-            Log::info('Conference registration created with ID: ' . $registration->id);
-
-            // Prepare Sampath payment data
+            // Initiate Sampath Bank payment via slia.lk
             $paymentData = [
-                'merchantId' => $this->sampathConfig['merchant_id'],
-                'merchantKey' => $this->sampathConfig['merchant_key'],
-                'orderId' => $registrationNumber,
-                'amount' => number_format($fees['total_amount'], 2, '.', ''),
-                'currency' => $this->sampathConfig['currency'],
-                'customerFirstName' => $data['full_name'],
-                'customerLastName' => '',
-                'customerEmail' => $data['email'],
-                'customerPhone' => $data['phone'],
-                'customerAddress' => '',
-                'customerCity' => '',
-                'customerCountry' => 'LK',
-                'description' => 'SLIA National Conference 2025 Registration',
-                'returnUrl' => url($this->sampathConfig['return_url']),
-                'cancelUrl' => url($this->sampathConfig['cancel_url']),
-                'notifyUrl' => url($this->sampathConfig['notify_url']),
-                'timestamp' => time(),
+                'full_name' => $registration->full_name,
+                'email' => $registration->email,
+                'amount' => $data['total_amount'],
+                'client_ref' => 'CONF-' . $registration->id,
+                'registration_id' => $registration->id
             ];
 
-            // Generate signature (MD5 hash)
-            $signatureString = implode('', [
-                $paymentData['merchantId'],
-                $paymentData['orderId'],
-                $paymentData['amount'],
-                $paymentData['currency'],
-                $paymentData['customerFirstName'],
-                $paymentData['customerEmail'],
-                $paymentData['timestamp'],
-                $this->sampathConfig['merchant_key']
+            $paymentInit = $this->sampathPaymentService->initiatePayment($paymentData);
+
+            if (!$paymentInit['success']) {
+                throw new \Exception('Payment initialization failed: ' . ($paymentInit['message'] ?? 'Unknown error'));
+            }
+
+            // Store payment transaction ID in registration
+            $registration->update([
+                'payment_reqid' => $paymentInit['transaction_id'] ?? null,
+                'payment_status' => 'initiated'
             ]);
-            
-            $paymentData['signature'] = md5($signatureString);
 
-            Log::info('Initiating Sampath payment for registration: ' . $registrationNumber);
+            Log::info('Sampath payment initialized for registration ID: ' . $registration->id, [
+                'transaction_id' => $paymentInit['transaction_id'] ?? 'N/A'
+            ]);
 
-            // In test mode, return mock payment URL
-            if ($this->sampathConfig['test_mode']) {
-                $paymentUrl = 'https://test.sampath.lk/ipgtest/v1/payment/process?' . http_build_query($paymentData);
-                
-                DB::commit();
-                
-                return response()->json([
-                    'success' => true,
-                    'message' => 'Payment initiated successfully.',
-                    'registration_id' => $registration->id,
-                    'registration_number' => $registrationNumber,
-                    'payment_url' => $paymentUrl,
-                    'test_mode' => true,
-                    'fees' => $fees
-                ]);
-            }
+            DB::commit();
 
-            // Live mode - call Sampath API
-            $response = Http::post($this->sampathConfig['api_endpoint'], $paymentData);
+            return response()->json([
+                'success' => true,
+                'message' => 'Registration created successfully. Redirecting to payment gateway...',
+                'registration_id' => $registration->id,
+                'payment_url' => $paymentInit['payment_url'],
+                'transaction_id' => $paymentInit['transaction_id'] ?? null
+            ], 201);
 
-            if ($response->successful()) {
-                $result = $response->json();
-                
-                if ($result['status'] === 'SUCCESS') {
-                    // Update registration with payment reference
-                    $registration->update([
-                        'payment_ref_no' => $result['transactionId'] ?? $registrationNumber
-                    ]);
-                    
-                    DB::commit();
-                    
-                    return response()->json([
-                        'success' => true,
-                        'message' => 'Payment initiated successfully.',
-                        'registration_id' => $registration->id,
-                        'registration_number' => $registrationNumber,
-                        'payment_url' => $result['paymentUrl'],
-                        'transaction_id' => $result['transactionId'],
-                        'fees' => $fees
-                    ]);
-                } else {
-                    throw new \Exception('Payment gateway error: ' . ($result['message'] ?? 'Unknown error'));
-                }
-            } else {
-                throw new \Exception('Payment gateway connection failed.');
-            }
 
         } catch (\Exception $e) {
             DB::rollBack();
             
-            Log::error('Conference Payment Initiation Error: ' . $e->getMessage());
+            Log::error('CRITICAL: Conference Registration Exception: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+                'membership' => $uniqueIdentifier ?? 'unknown',
+                'data' => $request->all()
+            ]);
 
             return response()->json([
                 'success' => false,
-                'message' => 'Payment initiation failed. Please try again.',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
+                'message' => 'Conference Registration could not be completed. Please try again.',
+                'error_detail' => $e->getMessage() . ' | ' . ($paymentInit['message'] ?? ''),
             ], 500);
         }
     }
 
-    /**
-     * Sampath payment callback (customer return)
-     */
-    public function paymentCallback(Request $request)
-    {
-        Log::info('Conference Payment Callback Received:', $request->all());
+    // In routes/api.php
 
-        $status = $request->input('status');
-        $orderId = $request->input('orderId');
-        $transactionId = $request->input('transactionId');
-        $amount = $request->input('amount');
 
-        try {
-            // Verify signature
-            $receivedSignature = $request->input('signature');
-            $expectedSignature = md5(implode('', [
-                $this->sampathConfig['merchant_id'],
-                $orderId,
-                $amount,
-                $this->sampathConfig['currency'],
-                $status,
-                $transactionId,
-                $this->sampathConfig['merchant_key']
-            ]));
 
-            if ($receivedSignature !== $expectedSignature) {
-                Log::error('Invalid payment signature', [
-                    'received' => $receivedSignature,
-                    'expected' => $expectedSignature
-                ]);
-                return redirect('/conference/registration/failed?reason=invalid_signature');
-            }
-
-            // Find registration by order ID
-            $registration = ConferenceRegistration::where('membership_number', 'LIKE', "%{$orderId}%")
-                ->orWhere('payment_ref_no', $orderId)
-                ->first();
-
-            if (!$registration) {
-                Log::error('Registration not found for order: ' . $orderId);
-                return redirect('/conference/registration/failed?reason=not_found');
-            }
-
-            if ($status === 'SUCCESS') {
-                // Update registration as paid
-                $registration->update([
-                    'payment_status' => 'completed',
-                    'payment_ref_no' => $transactionId,
-                    'payment_date' => now(),
-                ]);
-
-                // Generate QR code and send email
-                $this->sendConfirmationEmail($registration);
-
-                return redirect('/conference/registration/success?id=' . $registration->id);
-            } else {
-                // Payment failed
-                $registration->update(['payment_status' => 'failed']);
-                return redirect('/conference/registration/failed?id=' . $registration->id);
-            }
-
-        } catch (\Exception $e) {
-            Log::error('Payment Callback Error: ' . $e->getMessage());
-            return redirect('/conference/registration/failed?reason=error');
-        }
-    }
-
-    /**
-     * Sampath payment notification (server-to-server)
-     */
-    public function paymentNotify(Request $request)
-    {
-        Log::info('Conference Payment Notification:', $request->all());
-
-        // Similar to callback but for server-side processing
-        // You can implement email notifications to admin here
+public function testPaycorpConnection()
+{
+    try {
+        $result = $this->paycorpService->testConnection();
         
-        return response()->json(['status' => 'ok']);
+        return response()->json([
+            'success' => $result['success'],
+            'message' => $result['message'],
+            'endpoint' => config('services.paycorp.endpoint'),
+            'client_id' => substr(config('services.paycorp.client_id'), 0, 4) . '****',
+            'test_mode' => config('services.paycorp.test_mode'),
+            'details' => $result['client_info'] ?? null
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Test failed: ' . $e->getMessage(),
+            'endpoint' => config('services.paycorp.endpoint'),
+            'client_id' => config('services.paycorp.client_id')
+        ], 500);
     }
-
-    /**
-     * Send confirmation email with QR code
-     */
-    private function sendConfirmationEmail($registration)
-    {
-        try {
-            // Generate QR code
-            $qrContent = json_encode([
-                'id' => $registration->id,
-                'membership' => $registration->membership_number,
-                'name' => $registration->full_name,
-                'email' => $registration->email,
-                'category' => $registration->category,
-                'timestamp' => now()->timestamp,
-                'event' => 'SLIA National Conference 2025',
-                'venue' => 'Bandaranaike Memorial International Conference Hall (BMICH)',
-                'date' => '2025-02-20'
-            ]);
-            
-            $qrSvg = QrCode::format('svg')
-                ->size(400)
-                ->margin(2)
-                ->color(30, 64, 175) // Blue color for conference
-                ->backgroundColor(255, 255, 255)
-                ->errorCorrection('H')
-                ->generate($qrContent);
-            
-            $qrCode = 'data:image/svg+xml;base64,' . base64_encode($qrSvg);
-
-            // Generate PDF
-            $pdf = Pdf::loadView('pdf.conference-pass', [
-                'registration' => $registration,
-                'qr_code' => $qrCode,
-                'event_date' => '20 February 2025',
-                'event_venue' => 'BMICH',
-                'concession_eligible' => $registration->concession_eligible
-            ]);
-
-            $pdfContent = $pdf->output();
-
-            // Send email
-            Mail::send('emails.conference-confirmation', [
-                'registration' => $registration,
-                'event_date' => '20 February 2025',
-                'event_venue' => 'BMICH',
-                'total_amount' => number_format($registration->total_amount, 2),
-                'concession_note' => $registration->concession_eligible 
-                    ? 'Note: You are eligible for LKR 3,000 membership fee concession upon attendance.' 
-                    : ''
-            ], function ($message) use ($registration, $pdfContent) {
-                $message->to($registration->email)
-                        ->subject('SLIA National Conference 2025 - Registration Confirmation')
-                        ->attachData($pdfContent, 
-                            'SLIA-Conference-Pass-' . ($registration->membership_number ?? $registration->id) . '.pdf',
-                            ['mime' => 'application/pdf']
-                        );
-            });
-
-            // Update registration
-            $registration->update([
-                'email_sent' => true,
-                'qr_data' => $qrContent
-            ]);
-
-            Log::info('Conference confirmation email sent to: ' . $registration->email);
-
-        } catch (\Exception $e) {
-            Log::error('Conference email sending failed: ' . $e->getMessage());
-        }
-    }
+}
 
     /**
      * Check payment status
@@ -441,26 +389,354 @@ class ConferenceRegistrationController extends Controller
     public function checkPaymentStatus($registrationId)
     {
         try {
-            $registration = ConferenceRegistration::findOrFail($registrationId);
-            
+            $registration = ConferenceRegistration::find($registrationId);
+
+            if (!$registration) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Conference Registration not found.'
+                ], 404);
+            }
+
             return response()->json([
                 'success' => true,
                 'payment_status' => $registration->payment_status,
                 'payment_ref_no' => $registration->payment_ref_no,
-                'registration_complete' => $registration->payment_status === 'completed',
-                'email_sent' => $registration->email_sent,
-                'registration' => $registration
+                'registration_id' => $registration->id,
+                'member_name' => $registration->full_name,
+                'amount_paid' => $registration->total_amount
             ]);
+
         } catch (\Exception $e) {
+            Log::error('Check payment status failed: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Registration not found.'
-            ], 404);
+                'message' => 'Unable to check payment status.'
+            ], 500);
         }
     }
 
     /**
-     * Resend conference email
+     * Retry payment for an existing registration
+     */
+    public function retryPayment($id)
+    {
+        try {
+            $registration = ConferenceRegistration::find($id);
+
+            if (!$registration) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Conference Registration not found.'
+                ], 404);
+            }
+
+            if ($registration->payment_status === 'completed') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Payment already completed for this registration.'
+                ], 400);
+            }
+
+            // Initiate Sampath Bank payment via slia.lk
+            $paymentData = [
+                'full_name' => $registration->full_name,
+                'email' => $registration->email,
+                'amount' => $registration->total_amount,
+                'client_ref' => 'CONF-' . $registration->id,
+                'registration_id' => $registration->id
+            ];
+
+            $paymentInit = $this->sampathPaymentService->initiatePayment($paymentData);
+
+            if (!$paymentInit['success']) {
+                throw new \Exception('Payment initialization failed: ' . ($paymentInit['message'] ?? 'Unknown error'));
+            }
+
+            // Update payment request ID
+            $registration->update([
+                'payment_reqid' => $paymentInit['transaction_id'] ?? null,
+                'payment_status' => 'initiated'
+            ]);
+
+            Log::info('Sampath payment retried for registration ID: ' . $registration->id, [
+                'transaction_id' => $paymentInit['transaction_id'] ?? 'N/A'
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Payment initiated successfully.',
+                'registration_id' => $registration->id,
+                'payment_url' => $paymentInit['payment_url'],
+                'transaction_id' => $paymentInit['transaction_id'] ?? null
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Retry payment failed: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Unable to retry payment: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Payment notification from gateway
+     */
+    public function paymentNotify(Request $request)
+    {
+        Log::info('Payment notification received', $request->all());
+
+        try {
+            $reqid = $request->input('reqid');
+            $status = $request->input('status');
+
+            if (!$reqid) {
+                throw new \Exception('Missing required parameters');
+            }
+
+            $registration = ConferenceRegistration::where('payment_reqid', $reqid)->first();
+            if (!$registration) {
+                throw new \Exception('Registration not found for reqid: ' . $reqid);
+            }
+
+            if ($status === 'success' || $status === 'completed') {
+                if ($registration->payment_status !== 'completed') {
+                    $registration->update([
+                        'payment_status' => 'completed'
+                    ]);
+
+                    // Generate QR Code with comprehensive data
+                    $qrContent = $this->generateQrContent($registration);
+                    $qrCode = $this->generateQrCode($qrContent);
+                    
+                    // Dispatch Email Job
+                    $registrationData = [
+                        'full_name' => $registration->full_name,
+                        'membership_number' => $registration->membership_number,
+                        'email' => $registration->email,
+                        'mobile' => $registration->phone,
+                    ];
+                    SendConferencePassEmail::dispatch($registrationData, $qrCode, $registration->id);
+
+                    Log::info('Payment notification processed and Email dispatched for reqid: ' . $reqid);
+                } else {
+                    Log::info('Payment notification received but registration already completed for reqid: ' . $reqid);
+                }
+            } else {
+                // Payment failed via webhook - DELETE the registration
+                $registrationId = $registration->id;
+                
+                Log::warning('Payment failed notification for registration ID: ' . $registrationId, [
+                    'reqid' => $reqid,
+                    'status' => $status,
+                    'action' => 'deleting_registration'
+                ]);
+                
+                $registration->delete();
+                
+                Log::info('Failed payment registration deleted from database via webhook: ' . $registrationId);
+            }
+
+            return response()->json(['success' => true, 'message' => 'Notification processed']);
+
+        } catch (\Exception $e) {
+            Log::error('Payment notification error: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => 'Notification failed'], 500);
+        }
+    }
+
+    /**
+     * Mark attendance for Conference
+     */
+    public function markAttendance(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'membership_number' => 'required|string',
+            'mark_food_received' => 'boolean',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid input.'
+            ], 422);
+        }
+
+        try {
+            $data = $validator->validated();
+            $identifier = trim(strtoupper($data['membership_number']));
+
+            $registration = ConferenceRegistration::where(function($q) use ($identifier) {
+                    $q->where('membership_number', $identifier)
+                      ->orWhere('student_id', $identifier)
+                      ->orWhere('nic_passport', $identifier)
+                      ->orWhere('id', $identifier);
+                })->first();
+
+            if (!$registration) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Conference Registration not found.'
+                ], 404);
+            }
+
+            // Check if payment is completed
+            if ($registration->payment_status !== 'completed') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Payment not completed for this conference registration.'
+                ], 400);
+            }
+
+            if ($registration->attended) {
+                $message = 'Attendance already marked for this member.';
+                if (isset($data['mark_food_received']) && $data['mark_food_received'] && !$registration->food_received) {
+                    if ($registration->include_lunch) {
+                        $registration->update(['food_received' => true]);
+                        $message .= ' Food received status updated.';
+                    } else {
+                        $message .= ' Registration does not include lunch.';
+                    }
+                }
+                
+                return response()->json([
+                    'success' => true,
+                    'message' => $message,
+                    'food_received' => $registration->food_received
+                ], 200);
+            }
+
+            $updateData = [
+                'attended' => true,
+                'check_in_time' => now(),
+            ];
+
+            if (isset($data['mark_food_received']) && $data['mark_food_received'] && $registration->include_lunch) {
+                $updateData['food_received'] = true;
+            }
+
+            $registration->update($updateData);
+
+            Log::info('Conference Attendance marked for: ' . $identifier, [
+                'member_name' => $registration->full_name,
+                'food_received' => $registration->food_received,
+                'include_lunch' => $registration->include_lunch,
+                'meal_pref' => $registration->meal_preference,
+                'has_lunch' => $registration->include_lunch ? 'YES' : 'NO',
+                'has_pref' => $registration->meal_preference ? 'YES' : 'NO'
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Attendance marked successfully.' . 
+                    (isset($data['mark_food_received']) && $data['mark_food_received'] && $registration->include_lunch ? 
+                     ' Food marked as received.' : ''),
+                'data' => [
+                    'membership_number' => $registration->membership_number ?? $registration->student_id ?? $registration->nic_passport,
+                    'full_name' => $registration->full_name,
+                    'meal_preference' => $registration->meal_preference,
+                    'attended' => $registration->attended,
+                    'food_received' => $registration->food_received,
+                    'include_lunch' => $registration->include_lunch,
+                    'category' => $registration->category,
+                    'check_in_time' => $registration->check_in_time
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Conference Attendance marking failed: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Unable to mark attendance.'
+            ], 500);
+        }
+    }
+
+
+
+    /**
+     * Mark food as received for Conference
+     */
+    public function markFoodReceived(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'membership_number' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid input.'
+            ], 422);
+        }
+
+        try {
+            $data = $validator->validated();
+            $identifier = trim(strtoupper($data['membership_number']));
+
+            $registration = ConferenceRegistration::where(function($q) use ($identifier) {
+                    $q->where('membership_number', $identifier)
+                      ->orWhere('student_id', $identifier)
+                      ->orWhere('nic_passport', $identifier)
+                      ->orWhere('id', $identifier);
+                })->first();
+
+            if (!$registration) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Conference Registration not found.'
+                ], 404);
+            }
+
+            if (!$registration->attended) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Member has not checked in for attendance yet.'
+                ], 400);
+            }
+
+            if (!$registration->include_lunch) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'This registration does not include lunch.'
+                ], 400);
+            }
+
+            if ($registration->food_received) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Food already marked as received.'
+                ], 400);
+            }
+
+            $registration->update(['food_received' => true]);
+
+            Log::info('Conference Food marked as received for: ' . $identifier, [
+                'member_name' => $registration->full_name
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Food marked as received successfully.',
+                'data' => [
+                    'membership_number' => $registration->membership_number ?? $registration->student_id ?? $registration->nic_passport,
+                    'full_name' => $registration->full_name,
+                    'food_received' => $registration->food_received
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Conference Food marking failed: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Unable to mark food as received.'
+            ], 500);
+        }
+    }
+
+    /**
+     * Resend Conference email
      */
     public function resendEmail(Request $request)
     {
@@ -476,635 +752,802 @@ class ConferenceRegistrationController extends Controller
             ], 422);
         }
 
+        $data = $validator->validated();
+        $membership_number = trim(strtoupper($data['membership_number']));
+
         try {
-            $registration = ConferenceRegistration::where('membership_number', $request->membership_number)
-                ->where('email', $request->email)
-                ->where('payment_status', 'completed')
+            $registration = ConferenceRegistration::where(function($q) use ($membership_number) {
+                    $q->where('membership_number', $membership_number)
+                      ->orWhere('student_id', $membership_number)
+                      ->orWhere('nic_passport', $membership_number)
+                      ->orWhere('id', $membership_number);
+                })
+                ->where('email', $data['email'])
                 ->first();
 
             if (!$registration) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Paid registration not found.'
+                    'message' => 'Conference Registration not found.'
                 ], 404);
             }
 
-            $this->sendConfirmationEmail($registration);
+            Log::info('Resending Conference email for registration ID: ' . $registration->id);
+
+            $qrContent = $this->generateQrContent($registration);
+            $qrCode = $this->generateQrCode($qrContent);
+            $pdf = $this->generateConferencePass($registration, $qrCode);
+            
+            // Dispatch Email Job (Async)
+            try {
+                $registrationData = [
+                    'full_name' => $registration->full_name,
+                    'membership_number' => $registration->membership_number,
+                    'email' => $registration->email,
+                    'mobile' => $registration->phone,
+                ];
+                SendConferencePassEmail::dispatch($registrationData, $qrCode, $registration->id);
+                Log::info('Conference Email Job dispatched for: ' . $registration->email);
+            } catch (\Exception $e) {
+                Log::error('Failed to dispatch Conference email job: ' . $e->getMessage());
+            }
 
             return response()->json([
                 'success' => true,
-                'message' => 'Conference confirmation has been resent to your email.'
+                'message' => 'Conference attendance pass has been queued for resending to your email.'
             ]);
 
         } catch (\Exception $e) {
-            Log::error('Conference resend email failed: ' . $e->getMessage());
+            Log::error('Conference Resend email failed: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Unable to resend email.'
+                'message' => 'Unable to resend Conference email. Please try again.'
             ], 500);
         }
     }
 
     /**
-     * Get registration by ID for success page
+     * Generate PDF for Conference download
+     */
+    public function generateA4Pass(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'membership' => 'required|string',
+            'name' => 'required|string',
+            'email' => 'required|email',
+            'qr' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid input.'
+            ], 422);
+        }
+
+        try {
+            $data = $validator->validated();
+            $membership_number = trim(strtoupper($data['membership']));
+
+            $registration = ConferenceRegistration::where(function($q) use ($membership_number) {
+                    $q->where('membership_number', $membership_number)
+                      ->orWhere('student_id', $membership_number)
+                      ->orWhere('nic_passport', $membership_number)
+                      ->orWhere('id', $membership_number);
+                })
+                ->where('email', $data['email'])
+                ->first();
+
+            if (!$registration) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Conference Registration not found.'
+                ], 404);
+            }
+
+            Log::info('Manual Conference PDF download for: ' . $membership_number);
+
+            // Generate QR code from the provided string
+            $qrCode = $data['qr'];
+            
+            // Generate PDF
+            $pdf = $this->generateConferencePass($registration, $qrCode);
+
+            return $pdf->download('Conference-Registration-Pass-' . $membership_number . '.pdf');
+
+        } catch (\Exception $e) {
+            Log::error('Conference PDF generation failed: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Unable to generate Conference PDF.'
+            ], 500);
+        }
+    }
+
+    /**
+     * Get Conference registration statistics
+     */
+    public function getStats()
+    {
+        try {
+            $total = ConferenceRegistration::where('payment_status', 'completed')->count();
+            $totalRevenue = ConferenceRegistration::where('payment_status', 'completed')->sum('total_amount');
+            $attended = ConferenceRegistration::where('payment_status', 'completed')->where('attended', true)->count();
+            $notAttended = ConferenceRegistration::where('payment_status', 'completed')->where('attended', false)->count();
+            $sliaMembers = ConferenceRegistration::where('payment_status', 'completed')->where('category', 'slia_member')->count();
+            $licentiate = ConferenceRegistration::where('payment_status', 'completed')->where('category', 'licentiate')->count();
+            $generalPublic = ConferenceRegistration::where('payment_status', 'completed')->where('category', 'general_public')->count();
+            $international = ConferenceRegistration::where('payment_status', 'completed')->where('category', 'international')->count();
+            $today = ConferenceRegistration::where('payment_status', 'completed')->whereDate('created_at', today())->count();
+            $lastWeek = ConferenceRegistration::where('payment_status', 'completed')->whereDate('created_at', '>=', now()->subDays(7))->count();
+            $foodReceived = ConferenceRegistration::where('payment_status', 'completed')->where('food_received', true)->count();
+            $withLunch = ConferenceRegistration::where('payment_status', 'completed')->where('include_lunch', true)->count();
+            $paid = $total;
+            $pending = ConferenceRegistration::where('payment_status', 'pending')->count();
+            $failed = ConferenceRegistration::where('payment_status', 'failed')->count();
+            
+            $attendanceRate = $total > 0 ? ($attended / $total) * 100 : 0;
+            $foodRate = $withLunch > 0 ? ($foodReceived / $withLunch) * 100 : 0;
+            $paymentRate = $total > 0 ? ($paid / $total) * 100 : 0;
+
+            $vegCount = ConferenceRegistration::where('meal_preference', 'veg')->count();
+            $nonVegCount = ConferenceRegistration::where('meal_preference', 'non_veg')->count();
+
+            return response()->json([
+                'success' => true,
+                'stats' => [
+                    'total_registrations' => $total,
+                    'total_revenue' => $totalRevenue,
+                    'slia_members' => $sliaMembers,
+                    'architectural_licentiate' => $licentiate,
+                    'general' => $generalPublic,
+                    'international' => $international,
+                    'attended' => $attended,
+                    'not_attended' => $notAttended,
+                    'attendance_rate' => round($attendanceRate, 2) . '%',
+                    'food_received' => $foodReceived,
+                    'with_lunch' => $withLunch,
+                    'veg_meals' => $vegCount,
+                    'non_veg_meals' => $nonVegCount,
+                    'food_distribution_rate' => round($foodRate, 2) . '%',
+                    'paid_registrations' => $paid,
+                    'pending_payments' => $pending,
+                    'failed_payments' => $failed,
+                    'payment_success_rate' => round($paymentRate, 2) . '%',
+                    'registered_today' => $today,
+                    'registered_last_7_days' => $lastWeek,
+                    'last_registration' => ConferenceRegistration::latest()->first()->created_at ?? null,
+                    'last_attendance' => ConferenceRegistration::where('attended', true)
+                        ->latest('check_in_time')
+                        ->first()->check_in_time ?? null,
+                    'last_food_served' => ConferenceRegistration::where('food_received', true)
+                        ->latest('updated_at')
+                        ->first()->updated_at ?? null
+                ]
+            ], 200);
+        } catch (\Exception $e) {
+            Log::error('Conference Stats retrieval failed: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => 'Unable to fetch Conference stats'], 500);
+        }
+    }
+
+    /**
+     * Get payment statistics for Conference
+     */
+    public function getPaymentStats()
+    {
+        try {
+            $total = ConferenceRegistration::count();
+            $paid = ConferenceRegistration::where('payment_status', 'completed')->count();
+            $pending = ConferenceRegistration::where('payment_status', 'pending')->count();
+            $failed = ConferenceRegistration::where('payment_status', 'failed')->count();
+            
+            $revenue = $this->calculateTotalRevenue();
+            $averagePayment = $paid > 0 ? round($revenue / $paid) : 0;
+
+            $todayRevenue = $this->calculateTodayRevenue();
+            $lastWeekRevenue = $this->calculateLastWeekRevenue();
+
+            return response()->json([
+                'success' => true,
+                'stats' => [
+                    'total_registrations' => $total,
+                    'payment_completed' => $paid,
+                    'payment_pending' => $pending,
+                    'payment_failed' => $failed,
+                    'payment_success_rate' => round(($paid / $total) * 100, 2) . '%',
+                    'total_amount' => $revenue,
+                    'average_payment' => $averagePayment,
+                    'today_revenue' => $todayRevenue,
+                    'last_7_days_revenue' => $lastWeekRevenue,
+                    'revenue_by_category' => [
+                        'slia_member' => $this->calculateCategoryRevenue('slia_member'),
+                        'general_public' => $this->calculateCategoryRevenue('general_public'),
+                        'international' => $this->calculateCategoryRevenue('international')
+                    ]
+                ]
+            ], 200);
+        } catch (\Exception $e) {
+            Log::error('Conference Payment Stats retrieval failed: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => 'Unable to fetch payment stats'], 500);
+        }
+    }
+
+    /**
+     * Get all Conference registrations (admin function)
+     */
+    public function getAllRegistrations(Request $request)
+    {
+        try {
+            $perPage = $request->get('per_page', 20);
+            $sortBy = $request->get('sort_by', 'created_at');
+            $sortOrder = $request->get('sort_order', 'desc');
+            $attended = $request->get('attended');
+            $category = $request->get('category');
+            $foodReceived = $request->get('food_received');
+            $paymentStatus = $request->get('payment_status');
+            $search = $request->get('search');
+
+            $query = DB::table('conference_registrations')->select([
+                'id', 'membership_number', 'full_name', 'email', 'phone', 
+                'category', 'nic_passport', 'payment_ref_no', 'payment_status',
+                'include_lunch', 'meal_preference', 'food_received as meal_received', 'attended', 
+                'created_at', 'updated_at'
+            ]);
+
+            if ($attended !== null) {
+                $query->where('attended', filter_var($attended, FILTER_VALIDATE_BOOLEAN));
+            }
+
+            if ($category) {
+                $query->where('category', $category);
+            }
+
+            if ($foodReceived !== null) {
+                $query->where('food_received', filter_var($foodReceived, FILTER_VALIDATE_BOOLEAN));
+            }
+
+            if ($paymentStatus) {
+                $query->where('payment_status', $paymentStatus);
+            }
+
+            if ($search) {
+                $query->where(function($q) use ($search) {
+                    $q->where('membership_number', 'like', "%{$search}%")
+                      ->orWhere('full_name', 'like', "%{$search}%")
+                      ->orWhere('email', 'like', "%{$search}%")
+                      ->orWhere('phone', 'like', "%{$search}%")
+                      ->orWhere('nic_passport', 'like', "%{$search}%")
+                      ->orWhere('payment_ref_no', 'like', "%{$search}%");
+                });
+            }
+
+            $query->orderBy($sortBy, $sortOrder);
+            $registrations = $query->paginate($perPage);
+
+            return response()->json([
+                'success' => true,
+                'data' => $registrations,
+                'stats' => [
+                    'total' => $registrations->total(),
+                    'per_page' => $registrations->perPage(),
+                    'current_page' => $registrations->currentPage(),
+                    'last_page' => $registrations->lastPage(),
+                ]
+            ], 200);
+
+        } catch (\Exception $e) {
+            Log::error('Get Conference registrations failed: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => 'Unable to fetch registrations'], 500);
+        }
+    }
+
+    /**
+     * Export Conference registrations to CSV
+     */
+    public function exportRegistrations(Request $request)
+    {
+        try {
+            $registrations = ConferenceRegistration::where('payment_status', 'completed')->get();
+
+            $filename = 'conference-registrations-' . date('Y-m-d-H-i-s') . '.csv';
+            $headers = [
+                'Content-Type' => 'text/csv',
+                'Content-Disposition' => 'attachment; filename="' . $filename . '"',
+            ];
+
+            $callback = function() use ($registrations) {
+                $file = fopen('php://output', 'w');
+                
+                fputcsv($file, [
+                    'ID',
+                    'Membership Number',
+                    'Full Name',
+                    'Email',
+                    'Phone',
+                    'Category',
+                    'Is SLIA Member',
+                    'NIC/Passport',
+                    'Payment Request ID',
+                    'Payment Reference',
+                    'Payment Status',
+                    'Total Amount',
+                    'Include Lunch',
+                    'Attended',
+                    'Food Received',
+                    'Check-in Time',
+                    'Concession Eligible',
+                    'Concession Applied',
+                    'Member Verified',
+                    'Registration Date',
+                    'Registration Time',
+                    'Fellowship Registration'
+                ]);
+
+                foreach ($registrations as $registration) {
+                    fputcsv($file, [
+                        $registration->id,
+                        $registration->membership_number,
+                        $registration->full_name,
+                        $registration->email,
+                        $registration->phone,
+                        $registration->category,
+                        $registration->is_slia_member ? 'Yes' : 'No',
+                        $registration->nic_passport ?? 'N/A',
+                        $registration->payment_reqid ?? 'N/A',
+                        $registration->payment_ref_no ?? 'Pending',
+                        $registration->payment_status,
+                        $registration->total_amount,
+                        $registration->include_lunch ? 'Yes' : 'No',
+                        $registration->attended ? 'Yes' : 'No',
+                        $registration->food_received ? 'Yes' : 'No',
+                        $registration->check_in_time ? $registration->check_in_time->format('Y-m-d H:i:s') : 'N/A',
+                        $registration->concession_eligible ? 'Yes' : 'No',
+                        $registration->concession_applied ? 'Yes' : 'No',
+                        $registration->member_verified ? 'Yes' : 'No',
+                        $registration->created_at->format('Y-m-d'),
+                        $registration->created_at->format('H:i:s'),
+                        // Check for Fellowship Registration
+                        (function() use ($registration) {
+                            $query = FellowshipRegistration::where('payment_status', 'completed');
+                            
+                            $matched = false;
+                            if (!empty($registration->membership_number)) {
+                                $query->where('membership_number', $registration->membership_number);
+                                $matched = true;
+                            } elseif (!empty($registration->nic_passport)) {
+                                $query->where('nic_passport', $registration->nic_passport);
+                                $matched = true;
+                            }
+                            
+                            return ($matched && $query->exists()) ? 'Yes' : 'No';
+                        })()
+                    ]);
+                }
+
+                fclose($file);
+            };
+
+            return response()->stream($callback, 200, $headers);
+
+        } catch (\Exception $e) {
+            Log::error('Conference Export failed: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => 'Unable to export data'], 500);
+        }
+    }
+
+    /**
+     * Get Conference registration by ID
      */
     public function getRegistration($id)
     {
         try {
-            $registration = ConferenceRegistration::findOrFail($id);
-            
-            // Generate QR code for display
-            $qrContent = json_decode($registration->qr_data, true) ?? [
-                'id' => $registration->id,
-                'membership' => $registration->membership_number,
-                'name' => $registration->full_name,
-                'category' => $registration->category,
-                'event' => 'SLIA National Conference 2025'
-            ];
-            
-            $qrSvg = QrCode::format('svg')
-                ->size(300)
-                ->margin(2)
-                ->color(30, 64, 175)
-                ->backgroundColor(255, 255, 255)
-                ->errorCorrection('H')
-                ->generate(json_encode($qrContent));
-            
-            $qrCode = 'data:image/svg+xml;base64,' . base64_encode($qrSvg);
+            $registration = ConferenceRegistration::find($id);
+
+            if (!$registration) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Conference Registration not found.'
+                ], 404);
+            }
 
             return response()->json([
                 'success' => true,
-                'registration' => $registration,
-                'qr_code' => $qrCode,
-                'category_label' => $registration->getCategoryLabelAttribute(),
-                'event_date' => '20 February 2025',
-                'event_venue' => 'BMICH'
-            ]);
+                'data' => $registration
+            ], 200);
+
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Registration not found.'
-            ], 404);
+            Log::error('Get Conference registration failed: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => 'Unable to fetch registration'], 500);
         }
     }
 
-
-    // Add these methods to the ConferenceRegistrationController class
-
-/**
- * Get all conference registrations for admin
- */
-public function getAllRegistrations(Request $request)
-{
-    try {
-        $perPage = $request->get('per_page', 20);
-        $sortBy = $request->get('sort_by', 'created_at');
-        $sortOrder = $request->get('sort_order', 'desc');
-        $paymentStatus = $request->get('payment_status');
-        $category = $request->get('category');
-        $attended = $request->get('attended');
-        $search = $request->get('search');
-
-        $query = ConferenceRegistration::query();
-
-        if ($paymentStatus) {
-            $query->where('payment_status', $paymentStatus);
-        }
-
-        if ($category) {
-            $query->where('category', $category);
-        }
-
-        if ($attended !== null) {
-            $query->where('attended', filter_var($attended, FILTER_VALIDATE_BOOLEAN));
-        }
-
-        if ($search) {
-            $query->where(function($q) use ($search) {
-                $q->where('membership_number', 'like', "%{$search}%")
-                  ->orWhere('full_name', 'like', "%{$search}%")
-                  ->orWhere('email', 'like', "%{$search}%")
-                  ->orWhere('phone', 'like', "%{$search}%")
-                  ->orWhere('payment_ref_no', 'like', "%{$search}%");
-            });
-        }
-
-        $query->orderBy($sortBy, $sortOrder);
-        
-        if ($request->get('paginate', true)) {
-            $registrations = $query->paginate($perPage);
-            $data = $registrations->items();
-            $meta = [
-                'total' => $registrations->total(),
-                'per_page' => $registrations->perPage(),
-                'current_page' => $registrations->currentPage(),
-                'last_page' => $registrations->lastPage(),
-            ];
-        } else {
-            $data = $query->get();
-            $meta = [
-                'total' => count($data),
-                'per_page' => null,
-                'current_page' => 1,
-                'last_page' => 1,
-            ];
-        }
-
-        return response()->json([
-            'success' => true,
-            'data' => $data,
-            'meta' => $meta
-        ], 200);
-
-    } catch (\Exception $e) {
-        Log::error('Get conference registrations failed: ' . $e->getMessage());
-        return response()->json(['success' => false, 'message' => 'Unable to fetch registrations'], 500);
-    }
-}
-
-/**
- * Export conference registrations to CSV
- */
-public function exportRegistrations(Request $request)
-{
-    try {
-        $query = ConferenceRegistration::query();
-        
-        if ($request->has('payment_status')) {
-            $query->where('payment_status', $request->payment_status);
-        }
-        
-        if ($request->has('category')) {
-            $query->where('category', $request->category);
-        }
-        
-        $registrations = $query->get();
-
-        $filename = 'conference-registrations-' . date('Y-m-d-H-i-s') . '.csv';
-        $headers = [
-            'Content-Type' => 'text/csv',
-            'Content-Disposition' => 'attachment; filename="' . $filename . '"',
-        ];
-
-        $callback = function() use ($registrations) {
-            $file = fopen('php://output', 'w');
-            
-            // Add UTF-8 BOM for Excel compatibility
-            fwrite($file, "\xEF\xBB\xBF");
-            
-            fputcsv($file, [
-                'Registration ID',
-                'Membership Number',
-                'Full Name',
-                'Email',
-                'Phone',
-                'Category',
-                'Payment Status',
-                'Payment Reference',
-                'Total Amount',
-                'Include Lunch',
-                'Concession Eligible',
-                'Attended',
-                'Meal Received',
-                'Registration Date',
-                'Payment Date'
-            ]);
-
-            foreach ($registrations as $registration) {
-                fputcsv($file, [
-                    $registration->id,
-                    $registration->membership_number,
-                    $registration->full_name,
-                    $registration->email,
-                    $registration->phone,
-                    $registration->category,
-                    $registration->payment_status,
-                    $registration->payment_ref_no,
-                    $registration->total_amount,
-                    $registration->include_lunch ? 'Yes' : 'No',
-                    $registration->concession_eligible ? 'Yes' : 'No',
-                    $registration->attended ? 'Yes' : 'No',
-                    $registration->meal_received ? 'Yes' : 'No',
-                    $registration->created_at->format('Y-m-d H:i:s'),
-                    $registration->payment_date ? $registration->payment_date->format('Y-m-d H:i:s') : ''
-                ]);
-            }
-
-            fclose($file);
-        };
-
-        return response()->stream($callback, 200, $headers);
-
-    } catch (\Exception $e) {
-        Log::error('Conference export failed: ' . $e->getMessage());
-        return response()->json(['success' => false, 'message' => 'Unable to export data'], 500);
-    }
-}
-
-/**
- * Update a conference registration
- */
-public function updateRegistration(Request $request, $id)
-{
-    try {
-        $registration = ConferenceRegistration::find($id);
-        
-        if (!$registration) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Conference registration not found.'
-            ], 404);
-        }
-
+    /**
+     * Update Conference registration
+     */
+    public function updateRegistration(Request $request, $id)
+    {
         $validator = Validator::make($request->all(), [
             'full_name' => 'sometimes|string|max:255',
             'email' => 'sometimes|email|max:255',
             'phone' => 'sometimes|string|max:20',
             'category' => 'sometimes|in:slia_member,general_public,international',
+            'is_slia_member' => 'sometimes|boolean',
+            'nic_passport' => 'sometimes|string|max:50',
             'include_lunch' => 'sometimes|boolean',
+            'food_received' => 'sometimes|boolean',
+            'meal_received' => 'sometimes|boolean', // Alias for food_received
             'attended' => 'sometimes|boolean',
-            'meal_received' => 'sometimes|boolean',
+            'concession_eligible' => 'sometimes|boolean',
             'concession_applied' => 'sometimes|boolean',
-            'payment_status' => 'sometimes|in:pending,completed,failed',
+            'payment_ref_no' => 'sometimes|string|max:100',
+            'payment_status' => 'sometimes|in:pending,initiated,completed,failed',
+            'total_amount' => 'sometimes|numeric|min:0',
         ]);
 
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'message' => 'Validation failed.',
+                'message' => 'Invalid input.',
                 'errors' => $validator->errors()
             ], 422);
         }
 
-        $data = $validator->validated();
-        
-        // If marking meal received but not attended, don't allow
-        if (isset($data['meal_received']) && $data['meal_received'] && !$registration->attended && !isset($data['attended'])) {
+        try {
+            $registration = ConferenceRegistration::find($id);
+
+            if (!$registration) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Conference Registration not found.'
+                ], 404);
+            }
+
+            $data = $validator->validated();
+            
+            // Handle alias
+            if (isset($data['meal_received'])) {
+                $data['food_received'] = $data['meal_received'];
+                unset($data['meal_received']);
+            }
+
+            $registration->update($data);
+
+            Log::info('Conference Registration updated for ID: ' . $id, $validator->validated());
+
             return response()->json([
-                'success' => false,
-                'message' => 'Cannot mark meal received without attendance.'
-            ], 400);
+                'success' => true,
+                'message' => 'Conference Registration updated successfully.',
+                'data' => $registration
+            ], 200);
+
+        } catch (\Exception $e) {
+            Log::error('Update Conference registration failed: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => 'Unable to update registration'], 500);
         }
-
-        $registration->update($data);
-
-        Log::info('Conference registration updated', [
-            'id' => $registration->id,
-            'membership_number' => $registration->membership_number,
-            'updates' => $data
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Conference registration updated successfully.',
-            'data' => $registration
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Conference update failed: ' . $e->getMessage());
-        return response()->json([
-            'success' => false,
-            'message' => 'Unable to update conference registration.'
-        ], 500);
     }
-}
 
-/**
- * Delete a conference registration
- */
-public function deleteRegistration($id)
-{
-    try {
-        $registration = ConferenceRegistration::find($id);
-        
-        if (!$registration) {
+    /**
+     * Delete Conference registration
+     */
+    public function deleteRegistration($id)
+    {
+        try {
+            $registration = ConferenceRegistration::find($id);
+
+            if (!$registration) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Conference Registration not found.'
+                ], 404);
+            }
+
+            $identifier = $registration->membership_number ?: $registration->student_id ?: $registration->nic_passport ?: 'N/A';
+            $registration->delete();
+
+            Log::warning('Conference Registration deleted', [
+                'identifier' => $identifier,
+                'deleted_by' => auth()->id() ?? 'admin'
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Conference Registration deleted successfully.'
+            ], 200);
+
+        } catch (\Exception $e) {
+            Log::error('Delete Conference registration failed: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Conference registration not found.'
-            ], 404);
+                'message' => 'Unable to delete registration.'
+            ], 500);
         }
-
-        Log::info('Deleting conference registration', [
-            'id' => $registration->id,
-            'membership_number' => $registration->membership_number,
-            'name' => $registration->full_name
-        ]);
-
-        $registration->delete();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Conference registration deleted successfully.'
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Delete conference registration failed: ' . $e->getMessage());
-        return response()->json([
-            'success' => false,
-            'message' => 'Unable to delete conference registration.'
-        ], 500);
     }
-}
 
-/**
- * Generate QR code for a conference registration
- */
-public function generateQrCode($id)
-{
-    try {
-        $registration = ConferenceRegistration::find($id);
-        
-        if (!$registration) {
+    /**
+     * Test Paycorp connection
+     */
+    public function testPaymentConnection()
+    {
+        try {
+            $result = $this->paycorpService->testConnection();
+            
+            return response()->json([
+                'success' => $result['success'],
+                'message' => $result['message'],
+                'test_mode' => config('services.paycorp.test_mode'),
+                'client_id' => substr(config('services.paycorp.client_id'), 0, 4) . '****',
+                'endpoint' => config('services.paycorp.endpoint'),
+            ]);
+        } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Conference registration not found.'
-            ], 404);
+                'message' => 'Test failed: ' . $e->getMessage()
+            ], 500);
         }
+    }
 
-        $qrContent = json_encode([
+    /**
+     * Test Sampath bridge connection (slia.lk)
+     */
+    public function testSampathConnection()
+    {
+        try {
+            $result = $this->sampathPaymentService->testConnection();
+            
+            return response()->json([
+                'success' => $result['success'],
+                'message' => $result['message'],
+                'endpoint' => env('SAMPATH_ENDPOINT'),
+                'details' => $result
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Sampath bridge test failed: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * HELPER METHODS
+     */
+
+    /**
+     * Generate QR content with comprehensive data for admin scanning
+     */
+    private function generateQrContent($registration)
+    {
+        return json_encode([
             'id' => $registration->id,
             'membership' => $registration->membership_number,
-            'name' => $registration->full_name,
-            'email' => $registration->email,
-            'category' => $registration->category,
+            'student_id' => $registration->student_id,
+            'nic_passport' => $registration->nic_passport,
+            'full_name' => $registration->full_name,
+            'type' => $registration->category,
+            'event' => 'conference',
+            'include_lunch' => (bool)$registration->include_lunch,
+            'meal_preference' => $registration->meal_preference,
             'payment_status' => $registration->payment_status,
-            'timestamp' => now()->timestamp,
-            'event' => 'SLIA National Conference 2025',
-            'attended' => $registration->attended,
-            'meal_received' => $registration->meal_received
-        ]);
-        
-        $qrSvg = QrCode::format('svg')
-            ->size(400)
-            ->margin(2)
-            ->color(30, 64, 175)
+        ], JSON_UNESCAPED_SLASHES);
+    }
+
+    /**
+     * Generate QR code
+     */
+    private function generateQrCode($content)
+    {
+        $qrPng = QrCode::format('png')
+            ->size(300)
+            ->margin(1)
+            ->color(0, 51, 102)
             ->backgroundColor(255, 255, 255)
             ->errorCorrection('H')
-            ->generate($qrContent);
-        
-        $qrCode = 'data:image/svg+xml;base64,' . base64_encode($qrSvg);
-
-        return response()->json([
-            'success' => true,
-            'qr_code' => $qrCode,
-            'data' => [
-                'membership_number' => $registration->membership_number,
-                'full_name' => $registration->full_name,
-                'email' => $registration->email,
-                'category' => $registration->category,
-                'payment_status' => $registration->payment_status,
-                'attended' => $registration->attended,
-                'meal_received' => $registration->meal_received
-            ]
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Conference QR code generation failed: ' . $e->getMessage());
-        return response()->json([
-            'success' => false,
-            'message' => 'Unable to generate QR code.'
-        ], 500);
+            ->generate($content);
+            
+        return 'data:image/png;base64,' . base64_encode($qrPng);
     }
-}
 
-/**
- * Mark attendance for conference
- */
-public function markAttendance(Request $request, $id)
-{
-    try {
-        $registration = ConferenceRegistration::find($id);
+    /**
+     * Generate conference pass PDF
+     */
+    private function generateConferencePass($registration, $qrCode)
+    {
+        $data = [
+            'registration' => $registration,
+            'qrCode' => $qrCode,
+        ];
+
+        $pdf = Pdf::loadView('pdf.conference-pass', $data);
         
-        if (!$registration) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Conference registration not found.'
-            ], 404);
-        }
-
-        $validator = Validator::make($request->all(), [
-            'attended' => 'required|boolean',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid input.',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $data = $validator->validated();
-        
-        // Check if payment is completed before marking attendance
-        if ($data['attended'] && $registration->payment_status !== 'completed') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Cannot mark attendance for unpaid registration.'
-            ], 400);
-        }
-
-        $registration->update([
-            'attended' => $data['attended'],
-            'meal_received' => $data['attended'] ? $registration->meal_received : false
-        ]);
-
-        Log::info('Conference attendance marked', [
-            'id' => $registration->id,
-            'membership_number' => $registration->membership_number,
-            'attended' => $data['attended']
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Attendance marked successfully.',
-            'data' => $registration
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Conference attendance marking failed: ' . $e->getMessage());
-        return response()->json([
-            'success' => false,
-            'message' => 'Unable to mark attendance.'
-        ], 500);
+        return $pdf;
     }
-}
 
-/**
- * Mark meal as received for conference
- */
-public function markMealReceived(Request $request, $id)
-{
-    try {
-        $registration = ConferenceRegistration::find($id);
-        
-        if (!$registration) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Conference registration not found.'
-            ], 404);
+    /**
+     * Send conference email
+     */
+    private function sendConferenceEmail($registration, $pdf, $qrCode, $resend = false)
+    {
+        try {
+            // Generate PDF content
+            $pdfContent = $pdf->output();
+            
+            // Send email
+            Mail::to($registration->email)
+                ->send(new ConferenceRegistrationMail($registration, $pdfContent, $qrCode));
+
+            Log::info('Conference email sent to: ' . $registration->email . ($resend ? ' (Resend)' : ''));
+            
+            return true;
+        } catch (\Exception $e) {
+            Log::error('Conference email sending failed: ' . $e->getMessage());
+            return false;
         }
-
-        $validator = Validator::make($request->all(), [
-            'meal_received' => 'required|boolean',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid input.',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $data = $validator->validated();
-        
-        // Check if attended before marking meal received
-        if ($data['meal_received'] && !$registration->attended) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Cannot mark meal received without attendance.'
-            ], 400);
-        }
-
-        // Check if include_lunch is true
-        if ($data['meal_received'] && !$registration->include_lunch) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Registration does not include lunch.'
-            ], 400);
-        }
-
-        $registration->update(['meal_received' => $data['meal_received']]);
-
-        Log::info('Conference meal marked', [
-            'id' => $registration->id,
-            'membership_number' => $registration->membership_number,
-            'meal_received' => $data['meal_received']
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Meal status updated successfully.',
-            'data' => $registration
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Conference meal marking failed: ' . $e->getMessage());
-        return response()->json([
-            'success' => false,
-            'message' => 'Unable to update meal status.'
-        ], 500);
     }
-}
 
-/**
- * Get conference statistics
- */
-public function getStats()
-{
-    try {
-        $total = ConferenceRegistration::count();
-        $attended = ConferenceRegistration::where('attended', true)->count();
-        $notAttended = ConferenceRegistration::where('attended', false)->count();
-        $today = ConferenceRegistration::whereDate('created_at', today())->count();
-        $lastWeek = ConferenceRegistration::whereDate('created_at', '>=', now()->subDays(7))->count();
-        $mealReceived = ConferenceRegistration::where('meal_received', true)->count();
-        
-        // Payment stats
-        $paymentCompleted = ConferenceRegistration::where('payment_status', 'completed')->count();
-        $paymentPending = ConferenceRegistration::where('payment_status', 'pending')->count();
-        $paymentFailed = ConferenceRegistration::where('payment_status', 'failed')->count();
-        
-        // Category stats
-        $sliaMembers = ConferenceRegistration::where('category', 'slia_member')->count();
-        $generalPublic = ConferenceRegistration::where('category', 'general_public')->count();
-        $international = ConferenceRegistration::where('category', 'international')->count();
-        
-        // Financial stats
-        $totalAmount = ConferenceRegistration::where('payment_status', 'completed')->sum('total_amount');
-        
-        $attendanceRate = $total > 0 ? round(($attended / $total) * 100, 2) : 0;
-        $paymentSuccessRate = $total > 0 ? round(($paymentCompleted / $total) * 100, 2) : 0;
-
-        return response()->json([
-            'success' => true,
-            'stats' => [
-                'total_registrations' => $total,
-                'registered_today' => $today,
-                'registered_last_7_days' => $lastWeek,
-                'attended' => $attended,
-                'not_attended' => $notAttended,
-                'attendance_rate' => $attendanceRate . '%',
-                'meal_received' => $mealReceived,
-                'payment_completed' => $paymentCompleted,
-                'payment_pending' => $paymentPending,
-                'payment_failed' => $paymentFailed,
-                'payment_success_rate' => $paymentSuccessRate . '%',
-                'total_amount' => $totalAmount,
-                'category_breakdown' => [
-                    'slia_member' => $sliaMembers,
-                    'general_public' => $generalPublic,
-                    'international' => $international
-                ],
-                'last_registration' => ConferenceRegistration::latest()->first()->created_at ?? null,
-                'last_attendance' => ConferenceRegistration::where('attended', true)
-                    ->latest('updated_at')
-                    ->first()->updated_at ?? null,
-                'last_payment' => ConferenceRegistration::where('payment_status', 'completed')
-                    ->latest('payment_date')
-                    ->first()->payment_date ?? null
-            ]
-        ], 200);
-    } catch (\Exception $e) {
-        Log::error('Conference stats retrieval failed: ' . $e->getMessage());
-        return response()->json(['success' => false, 'message' => 'Unable to fetch conference stats'], 500);
+    /**
+     * Calculate total revenue
+     */
+    private function calculateTotalRevenue()
+    {
+        return ConferenceRegistration::where('payment_status', 'completed')->sum('total_amount');
     }
-}
 
-/**
- * Get payment statistics
- */
-public function getPaymentStats()
-{
-    try {
-        // Daily payment stats for last 30 days
-        $dailyStats = ConferenceRegistration::where('payment_status', 'completed')
-            ->where('created_at', '>=', now()->subDays(30))
-            ->selectRaw('DATE(created_at) as date, COUNT(*) as count, SUM(total_amount) as amount')
-            ->groupBy('date')
-            ->orderBy('date')
-            ->get();
-
-        // Category payment stats
-        $categoryStats = ConferenceRegistration::where('payment_status', 'completed')
-            ->selectRaw('category, COUNT(*) as count, SUM(total_amount) as amount')
-            ->groupBy('category')
-            ->get();
-
-        // Payment method stats (if you have payment_method column)
-        $paymentMethodStats = ConferenceRegistration::where('payment_status', 'completed')
-            ->selectRaw('payment_method, COUNT(*) as count, SUM(total_amount) as amount')
-            ->groupBy('payment_method')
-            ->get();
-
-        return response()->json([
-            'success' => true,
-            'stats' => [
-                'daily_payments' => $dailyStats,
-                'category_breakdown' => $categoryStats,
-                'payment_methods' => $paymentMethodStats,
-                'summary' => [
-                    'total_collected' => ConferenceRegistration::where('payment_status', 'completed')->sum('total_amount'),
-                    'average_transaction' => ConferenceRegistration::where('payment_status', 'completed')->avg('total_amount'),
-                    'highest_transaction' => ConferenceRegistration::where('payment_status', 'completed')->max('total_amount'),
-                    'lowest_transaction' => ConferenceRegistration::where('payment_status', 'completed')->min('total_amount'),
-                ]
-            ]
-        ], 200);
-    } catch (\Exception $e) {
-        Log::error('Payment stats retrieval failed: ' . $e->getMessage());
-        return response()->json(['success' => false, 'message' => 'Unable to fetch payment stats'], 500);
+    /**
+     * Calculate today's revenue
+     */
+    private function calculateTodayRevenue()
+    {
+        return ConferenceRegistration::where('payment_status', 'completed')
+            ->whereDate('updated_at', today())
+            ->sum('total_amount');
     }
-}
+
+    /**
+     * Calculate last week's revenue
+     */
+    private function calculateLastWeekRevenue()
+    {
+        return ConferenceRegistration::where('payment_status', 'completed')
+            ->whereDate('updated_at', '>=', now()->subDays(7))
+            ->sum('total_amount');
+    }
+
+    /**
+     * Calculate category revenue
+     */
+    private function calculateCategoryRevenue($category)
+    {
+        return ConferenceRegistration::where('payment_status', 'completed')
+            ->where('category', $category)
+            ->sum('total_amount');
+    }
+
+    /**
+     * Payment callback from slia.lk after Sampath Bank payment
+     */
+    public function paymentCallback(Request $request)
+    {
+        Log::info('Sampath Payment callback received from slia.lk', $request->all());
+
+        try {
+            // Get callback data from slia.lk
+            $transactionId = $request->input('transaction_id');
+            $reference = $request->input('reference'); // Format: CONF-{registration_id} or FELL-{registration_id}
+            $status = $request->input('status'); // 'completed' or 'failed'
+            $amount = $request->input('amount');
+            $bankReference = $request->input('bank_reference');
+            $signature = $request->input('signature');
+            
+            // SAFETY: Delegate FELL callbacks immediately to Fellowship Controller
+            if ($reference && str_starts_with($reference, 'FELL-')) {
+                Log::info('Delegating FELL callback from Conference Controller to Fellowship Controller', [
+                    'reference' => $reference,
+                    'transaction_id' => $transactionId
+                ]);
+                return app(\App\Http\Controllers\FellowshipRegistrationController::class)->paymentCallback($request);
+            }
+
+            if (!$transactionId || !$reference || !$status) {
+                throw new \Exception('Missing required callback parameters');
+            }
+            
+            // Verify HMAC signature from slia.lk
+            $callbackData = [
+                'transaction_id' => $transactionId,
+                'reference' => $reference,
+                'status' => $status,
+                'amount' => $amount,
+                'bank_reference' => $bankReference ?? '',
+                'payment_method' => $request->input('payment_method') ?? '',
+                'response_code' => $request->input('response_code') ?? '',
+                'response_message' => $request->input('response_message') ?? '',
+                'timestamp' => $request->input('timestamp'),
+                '_debug_raw' => $request->input('_debug_raw') ?? ''
+            ];
+            
+            // Log the raw debug data from the bridge
+            if (!empty($callbackData['_debug_raw'])) {
+                Log::warning('RAW BANK RESPONSE (via bridge): ' . $callbackData['_debug_raw']);
+            }
+            
+            if (!$this->sampathPaymentService->verifyCallback($callbackData, $signature)) {
+                Log::error('Sampath callback signature verification failed', [
+                    'reference' => $reference,
+                    'received_signature' => $signature,
+                    'calculated_signature' => $this->sampathPaymentService->generateSignature($callbackData),
+                    'data_used' => $callbackData
+                ]);
+                throw new \Exception('Invalid callback signature');
+            }
+            
+            // Extract registration ID from reference (CONF-123 => 123)
+            $registrationId = str_replace('CONF-', '', $reference);
+            $registration = ConferenceRegistration::find($registrationId);
+            
+            if (!$registration) {
+                throw new \Exception('Registration not found for reference: ' . $reference);
+            }
+            
+            if ($status === 'completed') {
+                // Payment successful
+                $registration->update([
+                    'payment_ref_no' => $bankReference ?? $transactionId,
+                    'payment_status' => 'completed',
+                    'payment_response' => json_encode($callbackData)
+                ]);
+                
+                // Generate QR code with comprehensive data for admin scanning
+                $qrContent = $this->generateQrContent($registration);
+                $qrCode = $this->generateQrCode($qrContent);
+                
+                // Send confirmation email with QR code
+                try {
+                    $registrationData = [
+                        'full_name' => $registration->full_name,
+                        'membership_number' => $registration->membership_number,
+                        'email' => $registration->email,
+                        'mobile' => $registration->phone,
+                    ];
+                    SendConferencePassEmail::dispatch($registrationData, $qrCode, $registration->id);
+                    Log::info('Conference pass email dispatched for: ' . $registration->email);
+                } catch (\Exception $e) {
+                    Log::error('Failed to dispatch conference email: ' . $e->getMessage());
+                }
+                
+                Log::info('Payment completed for registration ID: ' . $registration->id, [
+                    'bank_ref' => $bankReference,
+                    'transaction_id' => $transactionId
+                ]);
+                
+                // Redirect to frontend success page
+                $frontendUrl = rtrim(env('FRONTEND_URL', config('app.url')), '/');
+                return redirect()->away($frontendUrl . '/conference/confirmation/' . $registration->id);
+                
+            } else {
+                // Payment failed - DELETE the registration
+                $registrationId = $registration->id;
+                
+                Log::warning('Payment failed for registration ID: ' . $registrationId, [
+                    'transaction_id' => $transactionId,
+                    'status' => $status,
+                    'action' => 'deleting_registration'
+                ]);
+                
+                // Delete the registration completely
+                $registration->delete();
+                
+                Log::info('Failed payment registration deleted from database: ' . $registrationId);
+                
+                // Redirect to frontend failure page
+                $frontendUrl = rtrim(env('FRONTEND_URL', config('app.url')), '/');
+                return redirect()->away($frontendUrl . '/conference/payment-failed?type=conference&error=payment_failed&id=' . $registrationId);
+            }
+            
+        } catch (\Exception $e) {
+            Log::error('Payment callback error: ' . $e->getMessage());
+            $frontendUrl = rtrim(env('FRONTEND_URL', config('app.url')), '/');
+            return redirect()->away($frontendUrl . '/conference/payment-failed?error=payment_callback_failed');
+        }
+    }
 }

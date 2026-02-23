@@ -5,6 +5,25 @@ use Illuminate\Http\Request;
 
 define('LARAVEL_START', microtime(true));
 
+/**
+ * ===========================================
+ * DEPLOYMENT CONFIGURATION
+ * ===========================================
+ * 
+ * FOR LOCAL DEVELOPMENT: Use relative paths (current setup)
+ * FOR GODADDY CPANEL: Uncomment the production paths below
+ * 
+ * Replace 'your_username' with your actual cPanel username
+ * Example: If your username is 'sliauser', use:
+ * /home/sliauser/slia_backend/vendor/autoload.php
+ */
+
+// === LOCAL DEVELOPMENT PATHS (ACTIVE) ===
+$basePath = __DIR__.'/../';
+
+// === PRODUCTION PATHS (UNCOMMENT FOR DEPLOYMENT) ===
+// $basePath = '/home/your_username/slia_backend/';
+
 /*
 |--------------------------------------------------------------------------
 | Check If The Application Is Under Maintenance
@@ -16,7 +35,7 @@ define('LARAVEL_START', microtime(true));
 |
 */
 
-if (file_exists($maintenance = __DIR__.'/../storage/framework/maintenance.php')) {
+if (file_exists($maintenance = $basePath.'storage/framework/maintenance.php')) {
     require $maintenance;
 }
 
@@ -31,7 +50,7 @@ if (file_exists($maintenance = __DIR__.'/../storage/framework/maintenance.php'))
 |
 */
 
-require __DIR__.'/../vendor/autoload.php';
+require $basePath.'vendor/autoload.php';
 
 /*
 |--------------------------------------------------------------------------
@@ -44,7 +63,7 @@ require __DIR__.'/../vendor/autoload.php';
 |
 */
 
-$app = require_once __DIR__.'/../bootstrap/app.php';
+$app = require_once $basePath.'bootstrap/app.php';
 
 $kernel = $app->make(Kernel::class);
 

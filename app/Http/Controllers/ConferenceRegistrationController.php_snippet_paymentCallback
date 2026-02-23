@@ -1,0 +1,63 @@
+
+    /**
+     * Handle payment callback from gateway (Redirect)
+     */
+    public function paymentCallback(Request $request)
+    {
+        Log::info('Conference Payment callback received', $request->all());
+
+        try {
+            $reqid = $request->input('clientRef'); // format: CONF-{id}-{timestamp}
+            $status = $request->input('ms'); // SUCCESS or FAILED
+            
+            if (!$reqid) {
+                Log::error('Callback received without clientRef');
+                return redirect(config('app.frontend_url') . '/conference/payment-failed?error=invalid_callback');
+            }
+
+            // Extract ID from reqid
+            $parts = explode('-', $reqid);
+            if (count($parts) < 2) {
+                 Log::error('Invalid clientRef format: ' . $reqid);
+                 return redirect(config('app.frontend_url') . '/conference/payment-failed?error=invalid_ref');
+            }
+            
+            $id = $parts[1];
+            $registration = ConferenceRegistration::find($id);
+
+            if (!$registration) {
+                Log::error('Registration not found for callback reqid: ' . $reqid);
+                return redirect(config('app.frontend_url') . '/conference/payment-failed?error=not_found');
+            }
+
+            if ($status === 'SUCCESS' || $status === 'COMPLETED') {
+                if ($registration->payment_status !== 'completed') {
+                    $registration->update([
+                        'payment_status' => 'completed',
+                        'payment_date' => now()
+                    ]);
+
+                    // Generate QR Code
+                    $qrCode = QrCode::format('svg')->size(300)->generate($registration->id);
+                    
+                    // Dispatch Email Job matches
+                    SendConferencePassEmail::dispatch($registration, $qrCode);
+                    
+                    Log::info('Payment completed via callback for ID: ' . $id);
+                }
+
+                return redirect(config('app.frontend_url') . '/conference/confirmation/' . $registration->id);
+            } else {
+                 $registration->update([
+                    'payment_status' => 'failed'
+                 ]);
+                 
+                 Log::warning('Payment failed via callback for ID: ' . $id);
+                 return redirect(config('app.frontend_url') . '/conference/payment-failed?registration_id=' . $registration->id);
+            }
+
+        } catch (\Exception $e) {
+            Log::error('Payment callback exception: ' . $e->getMessage());
+            return redirect(config('app.frontend_url') . '/conference/payment-failed?error=exception');
+        }
+    }

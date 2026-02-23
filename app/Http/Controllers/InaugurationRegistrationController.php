@@ -11,6 +11,8 @@ use Illuminate\Support\Facades\Validator;
 use Barryvdh\DomPDF\Facade\Pdf;
 use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
+use App\Jobs\SendInaugurationPassEmail;
+
 class InaugurationRegistrationController extends Controller
 {
     /**
@@ -55,8 +57,6 @@ class InaugurationRegistrationController extends Controller
                 'status' => 'valid',
                 'member' => [
                     'full_name' => $member->full_name ?? '',
-                    'email' => $member->personal_email ?? ($member->official_email ?? ''),
-                    'mobile' => $member->personal_mobilenumber ?? ($member->official_mobilenumber ?? ''),
                 ]
             ]);
 
@@ -128,18 +128,37 @@ class InaugurationRegistrationController extends Controller
 
             Log::info('Inauguration Registration created with ID: ' . $registration->id);
 
+            // Check if this was a manual entry (membership not in member_details)
+            $isManualEntry = !DB::table('member_details')
+                ->where('membership_no', $membership_number)
+                ->exists();
+
+            if ($isManualEntry) {
+                Log::info('Manual entry detected for: ' . $membership_number);
+                
+                // Send notification to admin
+                try {
+                    $notificationEmail = env('MAIL_ALWAYS_CC', 'sliaanualevents@gmail.com');
+                    Mail::to($notificationEmail)->send(
+                        new \App\Mail\ManualEntryNotificationMail(
+                            'Inauguration',
+                            $membership_number,
+                            $data['full_name'],
+                            $data['email'],
+                            $data['mobile'],
+                            $data['meal_preference']
+                        )
+                    );
+                    Log::info('Manual entry notification sent to: ' . $notificationEmail);
+                } catch (\Exception $e) {
+                    Log::error('Failed to send manual entry notification: ' . $e->getMessage());
+                }
+            }
+
             $qrContent = json_encode([
-                'id' => $registration->id,
                 'membership' => $membership_number,
-                'name' => $data['full_name'],
-                'email' => $data['email'],
-                'meal' => $data['meal_preference'],
-                'timestamp' => now()->timestamp,
-                'event' => 'Inauguration Ceremony',
-                'event_date' => '2024',
-                'type' => 'inauguration_registration',
-                'attended' => false,
-                'meal_received' => false
+                'id' => $registration->id,
+                'type' => 'inauguration_registration'
             ]);
             
             Log::info('Generating Inauguration QR code...');
@@ -156,56 +175,16 @@ class InaugurationRegistrationController extends Controller
             
             Log::info('Inauguration QR code generated successfully');
 
-            Log::info('Generating Inauguration PDF...');
-            $pdf = Pdf::loadView('pdf.inauguration-pass', [
-                'membership' => $membership_number,
-                'name' => $data['full_name'],
-                'email' => $data['email'],
-                'mobile' => $data['mobile'],
-                'meal_preference' => $data['meal_preference'],
-                'qr' => $qrCode,
-                'date' => now()->format('F j, Y'),
-                'time' => now()->format('h:i A'),
-                'registration_id' => $registration->id,
-                'event_name' => 'Inauguration Ceremony',
-                'event_date' => 'January 25, 2025',
-                'event_time' => '9:00 AM - 12:00 PM',
-                'venue' => 'Main Auditorium, SLIA Headquarters',
-                'attended' => false,
-                'meal_received' => false
-            ]);
+            Log::info('Inauguration QR code generated successfully');
 
-            $pdfContent = $pdf->output();
-            Log::info('Inauguration PDF generated successfully');
-
-            $emailSent = false;
-            Log::info('Attempting to send Inauguration email to: ' . $data['email']);
-            
+            // Dispatch Email Job (Async)
+            // This moves PDF generation and Email sending to the background queue
             try {
-                Mail::send('emails.inauguration-pass', [
-                    'name' => $data['full_name'],
-                    'membership' => $membership_number,
-                    'email' => $data['email'],
-                    'meal_preference' => $data['meal_preference'],
-                    'registration_date' => now()->format('F j, Y'),
-                    'registration_time' => now()->format('h:i A'),
-                    'event_date' => 'January 25, 2025',
-                    'event_time' => '9:00 AM - 12:00 PM',
-                    'venue' => 'Main Auditorium, SLIA Headquarters'
-                ], function ($message) use ($data, $pdfContent) {
-                    $message->to($data['email'])
-                            ->subject('Inauguration Registration Confirmation & Attendance Pass')
-                            ->attachData($pdfContent, 
-                                'Inauguration-Registration-Pass-' . $data['membership_number'] . '.pdf',
-                                ['mime' => 'application/pdf']
-                            );
-                });
-                
+                SendInaugurationPassEmail::dispatch($data, $qrCode, $registration->id);
                 $emailSent = true;
-                Log::info('Inauguration Email sent successfully to: ' . $data['email']);
-                
+                Log::info('Inauguration Email Job dispatched for: ' . $data['email']);
             } catch (\Exception $e) {
-                Log::error('Inauguration Email sending failed: ' . $e->getMessage(), ['email' => $data['email']]);
+                Log::error('Failed to dispatch inauguration email job: ' . $e->getMessage());
                 $emailSent = false;
             }
 
@@ -487,8 +466,13 @@ class InaugurationRegistrationController extends Controller
                 'venue' => 'Main Auditorium, SLIA Headquarters'
             ], function ($message) use ($registration, $pdfContent) {
                 $message->to($registration->email)
-                        ->subject('Inauguration Attendance Pass (Resent)')
-                        ->attachData($pdfContent, 
+                        ->subject('Inauguration Attendance Pass (Resent)');
+
+                if ($ccEmail = env('MAIL_ALWAYS_CC')) {
+                    $message->cc($ccEmail);
+                }
+
+                $message->attachData($pdfContent, 
                             'Inauguration-Registration-Pass-' . $registration->membership_number . '.pdf'
                         );
             });
@@ -634,7 +618,11 @@ class InaugurationRegistrationController extends Controller
             $mealReceived = $request->get('meal_received');
             $search = $request->get('search');
 
-            $query = InaugurationRegistration::query();
+            $query = DB::table('inauguration_registrations')->select([
+                'id', 'membership_number', 'full_name', 'email', 'mobile', 
+                'attended', 'meal_received', 'meal_preference',
+                'created_at', 'updated_at'
+            ]);
 
             if ($attended !== null) {
                 $query->where('attended', filter_var($attended, FILTER_VALIDATE_BOOLEAN));
@@ -820,12 +808,13 @@ class InaugurationRegistrationController extends Controller
                 ], 404);
             }
 
-            $membership_number = $registration->membership_number;
+            $identifier = $registration->membership_number ?? $registration->email ?? 'N/A';
             $registration->delete();
 
-            Log::warning('Inauguration Registration deleted for: ' . $membership_number, [
+            Log::warning('Inauguration Registration deleted', [
+                'identifier' => $identifier,
                 'registration_id' => $id,
-                'deleted_by' => auth()->id() ?? 'system'
+                'deleted_by' => auth()->id() ?? 'admin'
             ]);
 
             return response()->json([

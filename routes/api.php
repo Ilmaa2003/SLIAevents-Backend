@@ -6,6 +6,18 @@ use App\Http\Controllers\AGMRegistrationController;
 use App\Http\Controllers\ExhibitionRegistrationController;
 use App\Http\Controllers\ConferenceRegistrationController;
 use App\Http\Controllers\AdminController;
+use Illuminate\Http\Request;
+
+/*
+|--------------------------------------------------------------------------
+| API Routes
+|--------------------------------------------------------------------------
+*/
+
+// Admin Auth and Global Stats
+Route::post('/admin/login', [AdminController::class, 'login']);
+Route::get('/admin/global-stats', [AdminController::class, 'getGlobalStats']);
+Route::get('/admin/lookup-registration', [AdminController::class, 'lookupRegistration']);
 
 /* ================= INAUGURATION ROUTES ================= */
 Route::prefix('inauguration')->group(function () {
@@ -29,6 +41,11 @@ Route::prefix('inauguration')->group(function () {
     Route::post('/registrations', 
         [InaugurationRegistrationController::class, 'store']
     );
+
+    // Get single registration (Public)
+    Route::get('/registrations/{id}', 
+        [InaugurationRegistrationController::class, 'getRegistration']
+    )->where('id', '[0-9]+');
     
     // Mark attendance
     Route::post('/mark-attendance', 
@@ -38,6 +55,11 @@ Route::prefix('inauguration')->group(function () {
     // Mark meal as received
     Route::post('/mark-meal-received', 
         [InaugurationRegistrationController::class, 'markMealReceived']
+    );
+    
+    // Bulk mark attendance
+    Route::post('/bulk-mark-attendance', 
+        [InaugurationRegistrationController::class, 'bulkMarkAttendance']
     );
     
     // Resend email
@@ -79,13 +101,18 @@ Route::prefix('inauguration')->group(function () {
         
         // Delete registration
         Route::delete('/registrations/{id}', 
-            [InaugurationRegistrationController::class, 'destroy']
+            [InaugurationRegistrationController::class, 'deleteRegistration'] // FIXED
         )->where('id', '[0-9]+');
         
         // Generate QR code
         Route::get('/registrations/{id}/qr-code', 
-            [InaugurationRegistrationController::class, 'getQrCode']
+            [InaugurationRegistrationController::class, 'generateQrCode'] // FIXED
         )->where('id', '[0-9]+');
+        
+        // Bulk mark attendance
+        Route::post('/bulk-attendance', 
+            [InaugurationRegistrationController::class, 'bulkMarkAttendance']
+        );
     });
 });
 
@@ -111,6 +138,11 @@ Route::prefix('agm')->group(function () {
     Route::post('/registrations', 
         [AGMRegistrationController::class, 'store']
     );
+
+    // Get single registration (Public)
+    Route::get('/registrations/{id}', 
+        [AGMRegistrationController::class, 'getRegistration']
+    )->where('id', '[0-9]+');
     
     // Mark attendance
     Route::post('/mark-attendance', 
@@ -173,6 +205,11 @@ Route::prefix('agm')->group(function () {
         Route::get('/registrations/{id}/qr-code', 
             [AGMRegistrationController::class, 'generateQrCode']
         )->where('id', '[0-9]+');
+        
+        // Bulk mark attendance
+        Route::post('/bulk-attendance', 
+            [AGMRegistrationController::class, 'bulkMarkAttendance']
+        );
     });
 });
 
@@ -198,6 +235,11 @@ Route::prefix('exhibition')->group(function () {
     Route::post('/registrations', 
         [ExhibitionRegistrationController::class, 'store']
     );
+
+    // Get single registration (Public)
+    Route::get('/registrations/{id}', 
+        [ExhibitionRegistrationController::class, 'getRegistration']
+    )->where('id', '[0-9]+');
     
     // Mark attendance
     Route::post('/mark-attendance', 
@@ -207,6 +249,11 @@ Route::prefix('exhibition')->group(function () {
     // Mark meal as received
     Route::post('/mark-meal-received', 
         [ExhibitionRegistrationController::class, 'markMealReceived']
+    );
+    
+    // Bulk mark attendance
+    Route::post('/bulk-mark-attendance', 
+        [ExhibitionRegistrationController::class, 'bulkMarkAttendance']
     );
     
     // Resend email
@@ -255,107 +302,208 @@ Route::prefix('exhibition')->group(function () {
         Route::get('/registrations/{id}/qr-code', 
             [ExhibitionRegistrationController::class, 'generateQrCode']
         )->where('id', '[0-9]+');
+        
+        // Bulk mark attendance
+        Route::post('/bulk-attendance', 
+            [ExhibitionRegistrationController::class, 'bulkMarkAttendance']
+        );
     });
 });
 
-/* ================= CONFERENCE ROUTES ================= */
+
+//Payment Bridge Test Routes
+use App\Http\Controllers\PaymentTestController;
+Route::get('/test-bridge-connection', [PaymentTestController::class, 'testConnection']);
+Route::get('/test-bridge-payment', [PaymentTestController::class, 'testBridge']);
+
+Route::get('/test-paycorp', [ConferenceRegistrationController::class, 'testPaycorpConnection']);
+Route::get('/test-sampath', [ConferenceRegistrationController::class, 'testSampathConnection']);
+
+// Conference Registration Routes
 Route::prefix('conference')->group(function () {
+    // Membership verification
+    Route::get('/verify-member/{membership_number}', [ConferenceRegistrationController::class, 'verifyMember']);
     
-    // Health check
-    Route::get('/', function() {
-        return response()->json([
-            'status' => 'active',
-            'service' => 'SLIA National Conference Registration API',
-            'version' => '1.0.0',
-            'features' => ['payment_gateway', 'attendance_tracking', 'qr_codes']
-        ]);
+    // Google Sheets Data Sync URL
+    Route::get('/google-sheets-data', function() {
+        return \App\Models\ConferenceRegistration::where('payment_status', 'completed')
+            ->orderBy('created_at', 'desc')
+            ->get();
     });
     
-    // Verify member
-    Route::get('/verify-member/{membership_number}', 
-        [ConferenceRegistrationController::class, 'verifyMember']
-    );
+    // Student ID validation
+    Route::post('/validate-student-id', [ConferenceRegistrationController::class, 'validateStudentId']);
     
-    // Register with payment
-    Route::post('/registrations', 
-        [ConferenceRegistrationController::class, 'initiatePayment']
-    );
+    // Registration & payment initiation
+    Route::post('/initiate-payment', [ConferenceRegistrationController::class, 'initiatePayment']);
+
+    // Get single registration (Public)
+    Route::get('/registrations/{id}', [ConferenceRegistrationController::class, 'getRegistration']);
     
-    // Check payment status
-    Route::get('/check-payment/{registrationId}', 
-        [ConferenceRegistrationController::class, 'checkPaymentStatus']
-    );
+    // Payment callback (from Paycorp)
+    Route::post('/payment-callback', [ConferenceRegistrationController::class, 'paymentCallback']);
+    Route::get('/payment-callback', [ConferenceRegistrationController::class, 'paymentCallback']);
     
-    // Resend email
-    Route::post('/resend-email', 
-        [ConferenceRegistrationController::class, 'resendEmail']
-    );
+    // Payment status checking
+    Route::get('/check-payment/{id}', [ConferenceRegistrationController::class, 'checkPaymentStatus']);
     
-    // Get registration by ID
-    Route::get('/registrations/{id}', 
-        [ConferenceRegistrationController::class, 'getRegistration']
-    )->where('id', '[0-9]+');
+    // Payment notification (optional)
+    Route::post('/payment-notify', [ConferenceRegistrationController::class, 'paymentNotify']);
     
-    // Payment callbacks
-    Route::post('/payment/callback', 
-        [ConferenceRegistrationController::class, 'paymentCallback']
-    );
+    // Attendance and food marking
+    Route::post('/mark-attendance', [ConferenceRegistrationController::class, 'markAttendance']);
+    Route::post('/mark-food-received', [ConferenceRegistrationController::class, 'markFoodReceived']);
     
-    Route::post('/payment/notify', 
-        [ConferenceRegistrationController::class, 'paymentNotify']
-    );
+    // Email resend
+    Route::post('/resend-email', [ConferenceRegistrationController::class, 'resendEmail']);
     
-    // Stats
-    Route::get('/stats', 
-        [ConferenceRegistrationController::class, 'getStats']
-    );
+    // Statistics
+    Route::get('/stats', [ConferenceRegistrationController::class, 'getStats']);
+    Route::get('/payment-stats', [ConferenceRegistrationController::class, 'getPaymentStats']);
+
+    // Download Pass (PDF)
+    Route::post('/generate-a4-pass', [ConferenceRegistrationController::class, 'generateA4Pass']);
     
     // Admin routes
     Route::prefix('admin')->group(function () {
-        // Get all registrations
-        Route::get('/registrations', 
-            [ConferenceRegistrationController::class, 'getAllRegistrations']
-        );
-        
-        // Export to CSV
-        Route::get('/export', 
-            [ConferenceRegistrationController::class, 'exportRegistrations']
-        );
-        
-        // Get single registration
-        Route::get('/registrations/{id}', 
-            [ConferenceRegistrationController::class, 'getRegistration']
-        )->where('id', '[0-9]+');
-        
-        // Update registration
-        Route::put('/registrations/{id}', 
-            [ConferenceRegistrationController::class, 'updateRegistration']
-        )->where('id', '[0-9]+');
-        
-        // Delete registration
-        Route::delete('/registrations/{id}', 
-            [ConferenceRegistrationController::class, 'deleteRegistration']
-        )->where('id', '[0-9]+');
-        
-        // Generate QR code for registration
-        Route::get('/registrations/{id}/qr-code', 
-            [ConferenceRegistrationController::class, 'generateQrCode']
-        )->where('id', '[0-9]+');
-        
-        // Mark attendance
-        Route::post('/registrations/{id}/mark-attendance', 
-            [ConferenceRegistrationController::class, 'markAttendance']
-        )->where('id', '[0-9]+');
-        
-        // Mark meal received
-        Route::post('/registrations/{id}/mark-meal', 
-            [ConferenceRegistrationController::class, 'markMealReceived']
-        )->where('id', '[0-9]+');
-        
-        // Get payment statistics
-        Route::get('/payment-stats', 
-            [ConferenceRegistrationController::class, 'getPaymentStats']
-        );
+        Route::get('/registrations', [ConferenceRegistrationController::class, 'getAllRegistrations']);
+        Route::get('/export', [ConferenceRegistrationController::class, 'exportRegistrations']);
+        Route::get('/registrations/{id}', [ConferenceRegistrationController::class, 'getRegistration']);
+        Route::put('/registrations/{id}', [ConferenceRegistrationController::class, 'updateRegistration']);
+        Route::delete('/registrations/{id}', [ConferenceRegistrationController::class, 'deleteRegistration']);
+        Route::get('/payment-stats', [ConferenceRegistrationController::class, 'getPaymentStats']);
+        Route::get('/dashboard-summary', [ConferenceRegistrationController::class, 'dashboardSummary']);
+    });
+    
+    // Test routes
+    Route::get('/test-payment', [ConferenceRegistrationController::class, 'testPaymentConnection']);
+    Route::post('/simulate-payment/{id}', [ConferenceRegistrationController::class, 'simulatePayment']);
+    
+    // ============ ADDITIONAL ROUTES ============
+    
+    // 1. Dashboard Summary
+    Route::get('/dashboard-summary', [ConferenceRegistrationController::class, 'dashboardSummary']);
+    
+    // 2. Search registrations
+    Route::get('/search', [ConferenceRegistrationController::class, 'searchRegistrations']);
+    
+    // 3. Bulk operations
+    Route::post('/bulk-mark-attendance', [ConferenceRegistrationController::class, 'bulkMarkAttendance']);
+    Route::post('/bulk-mark-food', [ConferenceRegistrationController::class, 'bulkMarkFoodReceived']);
+    
+    // 4. Export to different formats
+    Route::get('/export-excel', [ConferenceRegistrationController::class, 'exportToExcel']);
+    Route::get('/export-pdf', [ConferenceRegistrationController::class, 'exportToPDF']);
+    
+    // 5. Registration by membership number
+    Route::get('/by-membership/{membership_number}', [ConferenceRegistrationController::class, 'getByMembershipNumber']);
+    Route::get('/by-email/{email}', [ConferenceRegistrationController::class, 'getByEmail']);
+    
+    // 6. Check-in/Check-out operations
+    Route::post('/check-in/{id}', [ConferenceRegistrationController::class, 'checkIn']);
+    Route::post('/check-out/{id}', [ConferenceRegistrationController::class, 'checkOut']);
+    Route::get('/check-in-history/{id}', [ConferenceRegistrationController::class, 'checkInHistory']);
+    
+    // 7. QR Code operations
+    Route::get('/qr-code/{id}', [ConferenceRegistrationController::class, 'generateQrCode']);
+    Route::post('/validate-qr', [ConferenceRegistrationController::class, 'validateQrCode']);
+    
+    // 8. Certificate generation
+    Route::get('/certificate/{id}', [ConferenceRegistrationController::class, 'generateCertificate']);
+    Route::post('/send-certificate/{id}', [ConferenceRegistrationController::class, 'sendCertificate']);
+    
+    // 9. Payment retry/refund operations
+    Route::post('/retry-payment/{id}', [ConferenceRegistrationController::class, 'retryPayment']);
+    Route::post('/refund-payment/{id}', [ConferenceRegistrationController::class, 'refundPayment']);
+    Route::get('/payment-history/{id}', [ConferenceRegistrationController::class, 'paymentHistory']);
+    
+    // 10. Reports generation
+    Route::get('/report/daily', [ConferenceRegistrationController::class, 'dailyReport']);
+    Route::get('/report/category', [ConferenceRegistrationController::class, 'categoryReport']);
+    Route::get('/report/attendance', [ConferenceRegistrationController::class, 'attendanceReport']);
+    Route::get('/report/payment', [ConferenceRegistrationController::class, 'paymentReport']);
+    
+    // 11. Settings/Configuration
+    Route::get('/settings', [ConferenceRegistrationController::class, 'getSettings']);
+    Route::put('/settings', [ConferenceRegistrationController::class, 'updateSettings']);
+    
+    // 12. Notification operations
+    Route::post('/send-notification', [ConferenceRegistrationController::class, 'sendNotification']);
+    Route::get('/notifications', [ConferenceRegistrationController::class, 'getNotifications']);
+    
+    // 13. Analytics
+    Route::get('/analytics/trends', [ConferenceRegistrationController::class, 'registrationTrends']);
+    Route::get('/analytics/peak-hours', [ConferenceRegistrationController::class, 'peakHours']);
+    Route::get('/analytics/geographic', [ConferenceRegistrationController::class, 'geographicAnalytics']);
+    
+    // 14. Backup/Restore
+    Route::post('/backup', [ConferenceRegistrationController::class, 'backupData']);
+    Route::post('/restore', [ConferenceRegistrationController::class, 'restoreData']);
+    
+    // 15. Health check
+    Route::get('/health', [ConferenceRegistrationController::class, 'healthCheck']);
+    
+    // 16. Fee calculation
+    Route::post('/calculate-fee', [ConferenceRegistrationController::class, 'calculateFee']);
+    
+    // 17. Session management
+    Route::get('/sessions', [ConferenceRegistrationController::class, 'getSessions']);
+    Route::post('/register-session/{id}', [ConferenceRegistrationController::class, 'registerForSession']);
+    
+    // 18. Guest management
+    Route::post('/add-guest/{id}', [ConferenceRegistrationController::class, 'addGuest']);
+    Route::delete('/remove-guest/{guest_id}', [ConferenceRegistrationController::class, 'removeGuest']);
+    
+    // 19. Food preference management
+    Route::post('/update-food-preference/{id}', [ConferenceRegistrationController::class, 'updateFoodPreference']);
+    Route::get('/food-preferences', [ConferenceRegistrationController::class, 'getFoodPreferences']);
+    
+    // 20. Feedback/Survey
+    Route::post('/submit-feedback/{id}', [ConferenceRegistrationController::class, 'submitFeedback']);
+    Route::get('/feedback/{id}', [ConferenceRegistrationController::class, 'getFeedback']);
+    Route::get('/feedback-summary', [ConferenceRegistrationController::class, 'feedbackSummary']);
+    
+    // 21. Photo/Media upload
+    Route::post('/upload-photo/{id}', [ConferenceRegistrationController::class, 'uploadPhoto']);
+    Route::get('/photos/{id}', [ConferenceRegistrationController::class, 'getPhotos']);
+    
+    // 22. Conference schedule
+    Route::get('/schedule', [ConferenceRegistrationController::class, 'getSchedule']);
+    Route::post('/update-schedule/{id}', [ConferenceRegistrationController::class, 'updateScheduleAttendance']);
+    
+    // 23. Accreditation/CPD points
+    Route::post('/accredit/{id}', [ConferenceRegistrationController::class, 'accreditParticipant']);
+    Route::get('/cpd-points/{id}', [ConferenceRegistrationController::class, 'getCpdPoints']);
+    
+    // 24. Mass email/SMS
+    Route::post('/mass-communication', [ConferenceRegistrationController::class, 'massCommunication']);
+    
+    // 25. Integration endpoints
+    Route::post('/sync-to-crm', [ConferenceRegistrationController::class, 'syncToCRM']);
+    Route::get('/integration-status', [ConferenceRegistrationController::class, 'integrationStatus']);
+});
+
+/* ================= MEMBERS NIGHT 2026 ROUTES ================= */
+Route::prefix('fellowship')->group(function () {
+    Route::get('/verify-member/{membership_number}', [App\Http\Controllers\FellowshipRegistrationController::class, 'verifyMember']);
+    Route::post('/initiate-payment', [App\Http\Controllers\FellowshipRegistrationController::class, 'initiatePayment']);
+    Route::get('/check-payment/{id}', [App\Http\Controllers\FellowshipRegistrationController::class, 'checkPaymentStatus']);
+    Route::post('/payment/callback', [App\Http\Controllers\FellowshipRegistrationController::class, 'paymentCallback']);
+    Route::post('/mark-attendance', [App\Http\Controllers\FellowshipRegistrationController::class, 'markAttendance']);
+    Route::get('/stats', [App\Http\Controllers\FellowshipRegistrationController::class, 'getStats']);
+
+    // Google Sheets Data Sync URL
+    Route::get('/google-sheets-data', function() {
+        return \App\Models\FellowshipRegistration::where('payment_status', 'completed')
+            ->orderBy('created_at', 'desc')
+            ->get();
+    });
+
+    // Admin routes
+    Route::prefix('admin')->group(function () {
+        Route::get('/registrations', [App\Http\Controllers\FellowshipRegistrationController::class, 'getAllRegistrations']);
+        Route::get('/export', [App\Http\Controllers\FellowshipRegistrationController::class, 'export']);
+        Route::put('/registrations/{id}', [App\Http\Controllers\FellowshipRegistrationController::class, 'update']);
     });
 });
 
@@ -366,6 +514,15 @@ Route::prefix('admin')->group(function () {
     
     // Check admins
     Route::get('/list', [AdminController::class, 'checkAdmins']);
+    
+    // Logout
+    Route::post('/logout', [AdminController::class, 'logout']);
+    
+    // Validate token
+    Route::get('/validate', [AdminController::class, 'validateToken']);
+    
+    // Lookup registration (Scanning fallback)
+    Route::get('/lookup-registration', [AdminController::class, 'lookupRegistration']);
 });
 
 /* ================= COMBINED EVENT ROUTES ================= */
@@ -421,7 +578,7 @@ Route::get('/', function() {
                 'name' => 'inauguration',
                 'endpoint' => '/api/inauguration',
                 'description' => 'Inauguration Event Registration',
-                'features' => ['registration', 'attendance_tracking', 'meal_tracking', 'qr_codes']
+                'features' => ['registration', 'attendance_tracking', 'meal_tracking', 'qr_codes', 'bulk_operations']
             ],
             [
                 'name' => 'agm',
@@ -433,13 +590,13 @@ Route::get('/', function() {
                 'name' => 'exhibition',
                 'endpoint' => '/api/exhibition',
                 'description' => 'Exhibition Event Registration',
-                'features' => ['registration', 'attendance_tracking', 'meal_tracking', 'qr_codes']
+                'features' => ['registration', 'attendance_tracking', 'meal_tracking', 'qr_codes', 'bulk_operations']
             ],
             [
                 'name' => 'conference',
                 'endpoint' => '/api/conference',
                 'description' => 'National Conference Registration',
-                'features' => ['payment_gateway', 'registration', 'attendance_tracking', 'qr_codes', 'email_notifications']
+                'features' => ['payment_gateway', 'registration', 'attendance_tracking', 'qr_codes', 'email_notifications', 'bulk_operations']
             ]
         ],
         'new_features' => [
@@ -454,6 +611,7 @@ Route::get('/', function() {
             'verify_member' => 'GET /{event}/verify-member/{membership_number}',
             'mark_attendance' => 'POST /{event}/mark-attendance',
             'mark_meal_received' => 'POST /{event}/mark-meal-received',
+            'bulk_attendance' => 'POST /{event}/bulk-mark-attendance',
             'get_stats' => 'GET /{event}/stats',
             'admin_list' => 'GET /{event}/admin/registrations',
             'admin_export' => 'GET /{event}/admin/export'
